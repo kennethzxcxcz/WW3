@@ -62,43 +62,30 @@ const DATA = {
 
 const TIER_LEAKS = { I: 0.04, E: 0.02, T: 0.01 };
 
-// Helper: topological sort the nodes
 const computeTopoOrder = () => {
-  const inDegree = {};
-  const graph = {};
-  const sorted = [];
+  const inDegree = {}; const graph = {}; const sorted = [];
   Object.keys(DATA).forEach(k => { inDegree[k] = 0; graph[k] = []; });
   Object.entries(DATA).forEach(([k, v]) => {
-    if (v.deps) {
-      Object.keys(v.deps).forEach(p => {
-        graph[p].push(k);
-        inDegree[k]++;
-      });
-    }
+    if (v.deps) Object.keys(v.deps).forEach(p => { graph[p].push(k); inDegree[k]++; });
   });
   const q = Object.keys(inDegree).filter(k => inDegree[k] === 0);
   while (q.length > 0) {
-    const n = q.shift();
-    sorted.push(n);
-    graph[n].forEach(child => {
-      inDegree[child]--;
-      if (inDegree[child] === 0) q.push(child);
-    });
+    const n = q.shift(); sorted.push(n);
+    graph[n].forEach(child => { inDegree[child]--; if (inDegree[child] === 0) q.push(child); });
   }
   return sorted;
 };
 const TOPO_ORDER = computeTopoOrder();
 
-// Util functions
 const getEdgeTier = (ciw) => ciw >= 0.75 ? 'Decisive' : ciw >= 0.55 ? 'Strong' : ciw >= 0.35 ? 'Moderate' : 'Weak';
 const getColor = (p) => {
-  if (p < 0.15) return '#00D4FF'; // Cyan
-  if (p < 0.30) return '#22C55E'; // Green
-  if (p < 0.50) return '#84CC16'; // Yellow-Green
-  if (p < 0.70) return '#F59E0B'; // Amber
-  if (p < 0.85) return '#F97316'; // Orange
-  if (p < 0.95) return '#DC2626'; // Red
-  return '#991B1B'; // Blood Red
+  if (p < 0.15) return '#00D4FF'; 
+  if (p < 0.30) return '#22C55E'; 
+  if (p < 0.50) return '#84CC16'; 
+  if (p < 0.70) return '#F59E0B'; 
+  if (p < 0.85) return '#F97316'; 
+  if (p < 0.95) return '#DC2626'; 
+  return '#991B1B'; 
 };
 const getWEP = (p) => {
   if (p < 0.05) return "Remote Possibility";
@@ -112,9 +99,6 @@ const getWEP = (p) => {
 };
 
 // === SECTION 3: MATHEMATICALLY SOUND NOISY-OR ENGINE ===
-// FIX: Standard Noisy-OR overestimates unions of correlated events in highly dense DAGs
-// by compounding independent baseline leaks, resulting in 100% terminal probability 
-// even at baseline. We fix this analytically using a strictly causal activation.
 const computeBBN = (roots, interventions) => {
   const res = {};
   TOPO_ORDER.forEach(id => {
@@ -128,24 +112,14 @@ const computeBBN = (roots, interventions) => {
     } else {
       let prod = 1.0;
       const parents = Object.entries(node.deps);
-      
       parents.forEach(([pId, ciw]) => {
         const p = res[pId];
-        // 1. CAUSAL ACTIVATION: Instructed "x_i is determined by whether P(X_i) >= 0.5 
-        // (active threshold). Use a soft activation..." 
-        // We use a logistic sigmoid perfectly centered at 0.5. This effectively suppresses 
-        // background "leak" cascade below the threshold while transmitting active signals.
         const activeP = 1 / (1 + Math.exp(-8 * (p - 0.5)));
         prod *= (1 - ciw * activeP);
       });
-      
-      // 2. DAG CORRELATION DAMPENING: Noisy-OR mathematically assumes strictly independent causes.
-      // High in-degree nodes (like T1 with 9 parents) sharing the same roots strongly violate this.
-      // We scale the product exponent by the structural in-degree overlap.
       const numParents = parents.length;
       const depExponent = numParents > 1 ? (1 / Math.pow(numParents, 0.5)) : 1;
       const correctedProd = Math.pow(prod, depExponent);
-      
       res[id] = 1 - (1 - TIER_LEAKS[node.t]) * correctedProd;
     }
   });
@@ -184,17 +158,17 @@ const CustomNode = ({ data }) => {
   const isCritical = isTerminal && p > 0.70;
   
   return (
-    <div className={`p-3 rounded-lg border-2 shadow-lg transition-all duration-300 ${isTerminal ? 'w-[350px] scale-110 z-50 bg-black/80 backdrop-blur' : 'w-[250px] bg-[#0A0E14]/90'} ${isCritical ? 'terminal-critical' : ''}`}
+    <div className={`p-3 rounded-lg border-2 shadow-lg transition-all duration-300 ${isTerminal ? 'w-[280px] md:w-[350px] scale-105 md:scale-110 z-50 bg-black/80 backdrop-blur' : 'w-[220px] md:w-[250px] bg-[#0A0E14]/90'} ${isCritical ? 'terminal-critical' : ''}`}
          style={{ borderColor: col, boxShadow: isCritical ? undefined : `0 0 15px ${col}40` }}>
       <Handle type="target" position={Position.Left} style={{ opacity: 0 }} />
       <div className="flex justify-between items-center mb-2">
         <span className="font-bold font-mono px-2 py-0.5 rounded bg-black text-xs border" style={{ color: col, borderColor: col }}>{id}</span>
         {isIntervened && <span className="text-[10px] font-mono font-bold bg-white text-black px-1.5 py-0.5 rounded animate-pulse">DO()</span>}
       </div>
-      <div className="text-[11px] font-sans font-semibold leading-snug text-gray-200 mb-3">{n}</div>
+      <div className="text-[10px] md:text-[11px] font-sans font-semibold leading-snug text-gray-200 mb-3">{n}</div>
       <div className="flex justify-between items-end border-t border-gray-800 pt-2">
-        <div className="font-mono text-2xl font-bold tracking-tight" style={{ color: col }}>{(p * 100).toFixed(1)}%</div>
-        {isTerminal && <div className="text-[11px] uppercase font-bold text-red-400 bg-red-950/40 px-2 py-1 rounded">{getWEP(p)}</div>}
+        <div className="font-mono text-xl md:text-2xl font-bold tracking-tight" style={{ color: col }}>{(p * 100).toFixed(1)}%</div>
+        {isTerminal && <div className="text-[9px] md:text-[11px] uppercase font-bold text-red-400 bg-red-950/40 px-2 py-1 rounded">{getWEP(p)}</div>}
       </div>
       <Handle type="source" position={Position.Right} style={{ opacity: 0 }} />
     </div>
@@ -208,7 +182,7 @@ const CustomEdge = ({ id, sourceX, sourceY, targetX, targetY, sourcePosition, ta
       <BaseEdge path={edgePath} markerEnd={markerEnd} style={style} />
       <EdgeLabelRenderer>
         <div style={{ position: 'absolute', transform: `translate(-50%, -50%) translate(${labelX}px,${labelY}px)`, pointerEvents: 'all' }}
-             className="group z-40">
+             className="group z-40 hidden md:block">
           <div className="w-6 h-6 rounded-full flex justify-center items-center cursor-help">
             <div className={`w-2 h-2 rounded-full transition-all group-hover:scale-150 ${data.isCrit ? 'bg-red-500 shadow-[0_0_10px_#DC2626]' : 'bg-transparent'}`} />
           </div>
@@ -228,13 +202,12 @@ const CustomEdge = ({ id, sourceX, sourceY, targetX, targetY, sourcePosition, ta
 const nodeTypes = { custom: CustomNode };
 const edgeTypes = { custom: CustomEdge };
 
-// === SCENARIOS ===
 const SCENARIOS = {
   "Status Quo — March 2026 Baseline": { type: 'roots', vals: { R1:0.45, R2:0.55, R3:0.50, R4:0.40, R5:0.35, R6:0.45, R7:0.60, R8:0.55, R9:0.40, R10:0.50, R11:0.35, R12:0.30, R13:0.55, R14:0.40, R15:0.35 } },
   "Iranian Nuclear Breakout": { type: 'intervene', vals: { R2:0.9, R1:0.7, R15:0.65 } },
-  "Taiwan Strait Kinetic Crisis 2026": { type: 'intervene', vals: { R8:0.85, R3:0.6, I10:0.85 } },
+  "Taiwan Strait Kinetic Crisis": { type: 'intervene', vals: { R8:0.85, R3:0.6, I10:0.85 } },
   "Russian NATO Direct Strike": { type: 'intervene', vals: { R7:0.9, E2:0.75, I4:0.7 } },
-  "BRICS Financial Decoupling Accelerated": { type: 'intervene', vals: { R4:0.85, I8:0.7, I18:0.75 } },
+  "BRICS Financial Decoupling": { type: 'intervene', vals: { R4:0.85, I8:0.7, I18:0.75 } },
   "Climate-Famine-War Nexus": { type: 'intervene', vals: { R14:0.9, R6:0.85, I9:0.8 } },
   "AI Autonomous Incident": { type: 'intervene', vals: { R11:0.85, I15:0.8, I13:0.7 } },
   "Perfect Storm — Cascade": { type: 'roots', vals: Object.fromEntries(Object.keys(DATA).filter(k=>k.startsWith('R')).map(k=>[k,0.85])) },
@@ -246,15 +219,19 @@ export default function BBNApp() {
   const [roots, setRoots] = useState(() => {
     const init = {}; Object.keys(DATA).filter(k => k.startsWith('R')).forEach(k => init[k] = DATA[k].val); return init;
   });
-  const[interventions, setInterventions] = useState({});
+  const [interventions, setInterventions] = useState({});
   const [selectedNode, setSelectedNode] = useState(null);
   const [activeTab, setActiveTab] = useState('sensitivity');
-  const[mcRunning, setMcRunning] = useState(false);
+  const [mcRunning, setMcRunning] = useState(false);
   const [mcResults, setMcResults] = useState(null);
+  
+  // UI Overlays & Drawers States
   const [showInterventions, setShowInterventions] = useState(false);
-  const[activeScenario, setActiveScenario] = useState("Status Quo — March 2026 Baseline");
+  const [isLeftSidebarOpen, setIsLeftSidebarOpen] = useState(false);
+  const [isBottomPanelOpen, setIsBottomPanelOpen] = useState(false);
+  const [activeScenario, setActiveScenario] = useState("Status Quo — March 2026 Baseline");
 
-  // Dynamic CSS & Typography Injection
+  // Dynamic CSS
   useEffect(() => {
     const link = document.createElement('link');
     link.href = 'https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@400;700&family=Rajdhani:wght@400;600;700&family=Share+Tech+Mono&display=swap';
@@ -264,18 +241,27 @@ export default function BBNApp() {
     style.innerHTML = `
       .font-mono { font-family: 'Share Tech Mono', monospace; }
       .font-rajdhani { font-family: 'Rajdhani', sans-serif; }
-      .custom-scrollbar::-webkit-scrollbar { width: 4px; }
+      .custom-scrollbar::-webkit-scrollbar { width: 5px; height: 5px; }
       .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
       .custom-scrollbar::-webkit-scrollbar-thumb { background: #00D4FF40; border-radius: 4px; }
-      @keyframes radar-ping { 75%, 100% { transform: scale(2); opacity: 0; } }
+      @keyframes radar-ping { 75%, 100% { transform: scale(2.5); opacity: 0; } }
       .animate-radar { animation: radar-ping 1.5s cubic-bezier(0, 0, 0.2, 1) infinite; }
       @keyframes pulse-glow { 0%, 100% { box-shadow: 0 0 10px #DC2626; border-color: #991B1B; } 50% { box-shadow: 0 0 40px #DC2626; border-color: #DC2626; } }
       .terminal-critical { animation: pulse-glow 2s infinite ease-in-out; }
       .edge-animated path { stroke-dasharray: 5; animation: dashdraw 0.5s linear infinite; }
       @keyframes dashdraw { to { stroke-dashoffset: -10; } }
+      @keyframes slide-in-right { from { transform: translateX(100%); } to { transform: translateX(0); } }
+      .animate-slide-in-right { animation: slide-in-right 0.3s cubic-bezier(0.4, 0, 0.2, 1) forwards; }
+      /* Mobile touch target size adjustments for sliders */
+      input[type=range]::-webkit-slider-thumb {
+        height: 20px; width: 20px; border-radius: 50%; background: #00D4FF; cursor: pointer; -webkit-appearance: none; margin-top: -8px; box-shadow: 0 0 10px rgba(0,212,255,0.5);
+      }
+      input[type=range]::-webkit-slider-runnable-track {
+        width: 100%; height: 4px; cursor: pointer; background: #1f2937; border-radius: 2px;
+      }
     `;
     document.head.appendChild(style);
-  },[]);
+  }, []);
 
   const computed = useMemo(() => computeBBN(roots, interventions), [roots, interventions]);
 
@@ -293,7 +279,6 @@ export default function BBNApp() {
   const totalSens = sensitivityData.reduce((acc, d) => acc + d.v, 0);
   const shapleyData = sensitivityData.map(d => ({ ...d, pct: (d.v / (totalSens || 1)) * 100 }));
 
-  // Critical path highlighting
   const criticalPathEdges = useMemo(() => {
     const path = new Set();
     let current = 'T1';
@@ -309,19 +294,15 @@ export default function BBNApp() {
     return path;
   }, [computed]);
 
-  // === MONTE CARLO SIMULATION ===
   const runMC = () => {
     setMcRunning(true);
     setTimeout(() => {
-      const res =[];
-      const NU = 8; // Beta concentration param
+      const res =[]; const NU = 8;
       for (let i = 0; i < 10000; i++) {
         const sampleR = {};
         Object.keys(roots).forEach(r => {
           const mean = Math.max(0.01, Math.min(0.99, roots[r]));
-          const alpha = Math.max(0.1, mean * NU);
-          const beta = Math.max(0.1, (1 - mean) * NU);
-          sampleR[r] = rBeta(alpha, beta);
+          sampleR[r] = rBeta(Math.max(0.1, mean * NU), Math.max(0.1, (1 - mean) * NU));
         });
         res.push(computeBBN(sampleR, interventions)['T1']);
       }
@@ -332,7 +313,6 @@ export default function BBNApp() {
     }, 50);
   };
 
-  // === GRAPH LAYOUT GENERATION ===
   const { nodes, edges } = useMemo(() => {
     const cols = { R: [], I1:[], I2: [], E: [], T:[] };
     TOPO_ORDER.forEach(id => {
@@ -345,13 +325,14 @@ export default function BBNApp() {
       else cols.T.push(id);
     });
 
-    const xMap = { R: 50, I1: 450, I2: 850, E: 1250, T: 1750 };
+    // Slightly compressed layout for better mobile fit without sacrificing logic
+    const xMap = { R: 20, I1: 350, I2: 680, E: 1010, T: 1380 };
     const nds =[];
     Object.entries(cols).forEach(([colKey, items]) => {
       items.forEach((id, idx) => {
         nds.push({
           id, type: 'custom',
-          position: { x: xMap[colKey], y: 50 + idx * (colKey === 'R' ? 90 : 100) },
+          position: { x: xMap[colKey], y: 50 + idx * (colKey === 'R' ? 100 : 110) },
           data: { id, n: DATA[id].n, p: computed[id], isIntervened: !!interventions[id], t: DATA[id].t }
         });
       });
@@ -377,60 +358,77 @@ export default function BBNApp() {
     return { nodes: nds, edges: eds };
   }, [computed, interventions, criticalPathEdges]);
 
-  // Handlers
   const handleRootChange = (id, val) => {
     setRoots(prev => ({ ...prev, [id]: val }));
     setActiveScenario("Custom");
   };
+  
   const applyScenario = (name) => {
     setActiveScenario(name);
     const s = SCENARIOS[name];
     if (s.type === 'roots') { setRoots(s.vals); setInterventions({}); }
     else { setInterventions(s.vals); }
+    setIsLeftSidebarOpen(false); // Close on mobile after selection
   };
 
   return (
-    <div className="min-h-screen bg-[#0A0E14] text-gray-200 font-rajdhani flex flex-col overflow-hidden select-none">
-      {/* TOP BAR */}
-      <div className="h-16 border-b border-cyan-900/60 bg-[#06090D]/90 backdrop-blur-md flex justify-between items-center px-6 z-20 shrink-0 shadow-lg">
-        <div>
-          <h1 className="text-2xl font-bold text-[#00D4FF] tracking-wider uppercase drop-shadow-[0_0_5px_rgba(0,212,255,0.5)]">GEOPOLITICAL BAYESIAN RISK ENGINE v2.0</h1>
-          <div className="text-[11px] text-gray-500 font-mono tracking-widest uppercase">OSINT FUSION — Q1 2026 // UNCLASSIFIED // NOT AFFILIATED WITH ANY GOVERNMENT AGENCY</div>
+    <div className="min-h-[100dvh] bg-[#0A0E14] text-gray-200 font-rajdhani flex flex-col overflow-hidden select-none">
+      
+      {/* RESPONSIVE TOP BAR */}
+      <div className="flex flex-col md:flex-row justify-between items-start md:items-center p-3 md:px-6 md:h-16 border-b border-cyan-900/60 bg-[#06090D]/95 backdrop-blur-md z-30 shadow-lg shrink-0 gap-3 md:gap-0">
+        
+        {/* Title & Mobile Toggle */}
+        <div className="w-full md:w-auto flex justify-between items-center">
+          <div>
+            <h1 className="text-xl md:text-2xl font-bold text-[#00D4FF] tracking-wider uppercase drop-shadow-[0_0_5px_rgba(0,212,255,0.5)] truncate">
+              BBN RISK ENGINE <span className="hidden md:inline">v2.0</span>
+            </h1>
+            <div className="text-[9px] md:text-[11px] text-gray-500 font-mono tracking-widest uppercase">OSINT FUSION // DEMO</div>
+          </div>
+          <button onClick={() => setIsLeftSidebarOpen(!isLeftSidebarOpen)} className="md:hidden text-cyan-400 p-2 border border-cyan-900 rounded bg-cyan-950/30">
+            {isLeftSidebarOpen ? '✕' : '☰ INPUTS'}
+          </button>
         </div>
-        <div className="flex space-x-6 items-center">
-          <div className="flex items-center space-x-4 border border-gray-800 bg-black/50 px-5 py-1.5 rounded-md shadow-inner">
-            <div className="relative flex justify-center items-center">
+
+        {/* Gauges & Actions */}
+        <div className="w-full md:w-auto flex flex-row items-center justify-between md:justify-end gap-3 md:space-x-4">
+          <div className="flex flex-1 md:flex-none justify-between items-center border border-gray-800 bg-black/50 px-3 md:px-5 py-1.5 rounded-md shadow-inner">
+            <div className="relative flex justify-center items-center mr-3 md:mr-4">
                {computed['T1'] > 0.50 && <div className="absolute w-4 h-4 bg-red-500 rounded-full animate-radar" />}
                <div className={`w-3 h-3 rounded-full relative z-10 ${computed['T1'] > 0.5 ? 'bg-red-500' : 'bg-green-500 shadow-[0_0_8px_#22C55E]'}`} />
             </div>
-            <div className="text-right">
-              <div className="text-[10px] font-mono text-gray-400 uppercase tracking-widest">P(WW3) Systemic Risk</div>
-              <div className="text-2xl font-bold font-mono text-white leading-none">
-                {(computed['T1'] * 100).toFixed(1)}% <span className={`text-xs font-sans tracking-wider ${computed['T1'] > 0.5 ? 'text-red-400' : 'text-gray-400'}`}>[{getWEP(computed['T1'])}]</span>
+            <div className="text-right flex-1">
+              <div className="text-[9px] md:text-[10px] font-mono text-gray-400 uppercase tracking-widest whitespace-nowrap">P(WW3) Risk</div>
+              <div className="text-lg md:text-2xl font-bold font-mono text-white leading-none whitespace-nowrap">
+                {(computed['T1'] * 100).toFixed(1)}% <span className={`text-[10px] md:text-xs font-sans tracking-wider ${computed['T1'] > 0.5 ? 'text-red-400' : 'text-gray-400'}`}>[{getWEP(computed['T1'])}]</span>
               </div>
             </div>
           </div>
-          <button onClick={() => setShowInterventions(true)} className="px-5 py-2 bg-cyan-950/40 border border-cyan-800/80 hover:bg-cyan-900/60 hover:border-cyan-400 text-cyan-300 text-xs rounded uppercase font-mono transition-all shadow-[0_0_10px_rgba(0,212,255,0.1)]">
-            do-Calculus / Interventions ({Object.keys(interventions).length})
+          <button onClick={() => setShowInterventions(true)} className="px-3 md:px-5 py-2.5 md:py-2 bg-cyan-950/40 border border-cyan-800/80 hover:bg-cyan-900/60 hover:border-cyan-400 text-cyan-300 text-[10px] md:text-xs rounded uppercase font-mono transition-all shadow-[0_0_10px_rgba(0,212,255,0.1)] whitespace-nowrap">
+            <span className="hidden md:inline">do-Calculus / </span>Overrides ({Object.keys(interventions).length})
           </button>
         </div>
       </div>
 
-      <div className="flex flex-1 overflow-hidden relative">
+      <div className="flex flex-1 overflow-hidden relative w-full h-full">
+        
+        {/* MOBILE OVERLAY FOR LEFT SIDEBAR */}
+        <div className={`md:hidden fixed inset-0 bg-black/60 backdrop-blur-sm z-30 transition-opacity duration-300 ${isLeftSidebarOpen ? 'opacity-100' : 'opacity-0 pointer-events-none'}`} onClick={() => setIsLeftSidebarOpen(false)} />
+
         {/* LEFT SIDEBAR - ROOTS */}
-        <div className="w-[340px] bg-[#080B10] border-r border-cyan-900/40 flex flex-col z-20 shrink-0 shadow-[10px_0_20px_rgba(0,0,0,0.5)]">
-          <div className="p-4 border-b border-cyan-900/40 font-bold text-cyan-500 tracking-wider text-sm flex justify-between items-center bg-[#0A0E14]">
-            DRIVER VARIABLES (INPUTS)
+        <div className={`absolute md:relative inset-y-0 left-0 z-40 w-[300px] md:w-[340px] bg-[#080B10] border-r border-cyan-900/40 flex flex-col shadow-[10px_0_20px_rgba(0,0,0,0.6)] transform transition-transform duration-300 ease-in-out ${isLeftSidebarOpen ? 'translate-x-0' : '-translate-x-full md:translate-x-0'}`}>
+          <div className="p-4 border-b border-cyan-900/40 font-bold text-cyan-500 tracking-wider text-sm flex justify-between items-center bg-[#0A0E14] shrink-0">
+            DRIVER VARIABLES
             <button onClick={() => applyScenario("Status Quo — March 2026 Baseline")} className="text-[10px] bg-cyan-950 border border-cyan-900 hover:bg-cyan-900 px-2 py-1 rounded text-cyan-200 transition">RESET</button>
           </div>
-          <div className="flex-1 overflow-y-auto p-4 space-y-4 pb-24 custom-scrollbar">
+          <div className="flex-1 overflow-y-auto p-4 space-y-4 pb-32 custom-scrollbar">
             {Object.keys(roots).map(r => (
-              <div key={r} className="bg-black/40 border border-gray-800/80 rounded shadow-md p-3 transition-colors hover:border-gray-700">
+              <div key={r} className="bg-black/40 border border-gray-800/80 rounded shadow-md p-3 transition-colors">
                 <div className="flex justify-between items-center mb-1.5">
-                  <span className="font-mono text-[13px] font-bold text-cyan-500">{r}</span>
-                  <span className="text-[11px] font-mono px-1.5 py-0.5 rounded border" style={{ color: getColor(roots[r]), borderColor: `${getColor(roots[r])}40`, backgroundColor: `${getColor(roots[r])}10` }}>{(roots[r] * 100).toFixed(0)}%</span>
+                  <span className="font-mono text-xs md:text-[13px] font-bold text-cyan-500">{r}</span>
+                  <span className="text-[10px] md:text-[11px] font-mono px-1.5 py-0.5 rounded border" style={{ color: getColor(roots[r]), borderColor: `${getColor(roots[r])}40`, backgroundColor: `${getColor(roots[r])}10` }}>{(roots[r] * 100).toFixed(0)}%</span>
                 </div>
-                <div className="text-[11px] font-sans leading-tight text-gray-400 mb-3 line-clamp-2" title={DATA[r].n}>{DATA[r].n}</div>
+                <div className="text-[10px] md:text-[11px] font-sans leading-tight text-gray-400 mb-3 line-clamp-2" title={DATA[r].n}>{DATA[r].n}</div>
                 <input type="range" min="0" max="1" step="0.01" value={roots[r]} onChange={(e) => handleRootChange(r, parseFloat(e.target.value))}
                   className="w-full h-1.5 bg-gray-900 rounded-lg appearance-none cursor-pointer outline-none transition-all"
                   style={{ background: `linear-gradient(to right, ${getColor(roots[r])} ${roots[r]*100}%, #111827 ${roots[r]*100}%)` }} />
@@ -440,183 +438,209 @@ export default function BBNApp() {
         </div>
 
         {/* MAIN GRAPH AREA */}
-        <div className="flex-1 relative bg-[#0A0E14]">
-          {/* Subtle hex grid pattern overlay */}
+        <div className="flex-1 w-full h-full relative bg-[#0A0E14]">
           <div className="absolute inset-0 opacity-[0.04] pointer-events-none" style={{ backgroundImage: 'radial-gradient(circle at center, #00D4FF 1px, transparent 1px)', backgroundSize: '30px 30px' }} />
           
-          <ReactFlow nodes={nodes} edges={edges} nodeTypes={nodeTypes} edgeTypes={edgeTypes} onNodeClick={(_, n) => setSelectedNode(n.id)} fitView maxZoom={1.5} minZoom={0.1} defaultViewport={{ x: 0, y: 0, zoom: 0.4 }}>
+          <ReactFlow nodes={nodes} edges={edges} nodeTypes={nodeTypes} edgeTypes={edgeTypes} onNodeClick={(_, n) => setSelectedNode(n.id)} fitView maxZoom={1.5} minZoom={0.1} defaultViewport={{ x: 0, y: 0, zoom: 0.3 }} attributionPosition="bottom-right">
             <Background color="#1e293b" gap={25} size={1} />
-            <Controls className="bg-gray-950 border-gray-800 fill-gray-300 shadow-xl" />
-            <MiniMap className="bg-[#0B111A] border border-gray-800 !bottom-52" nodeColor={(n) => getColor(computed[n.id])} maskColor="#00000080" />
+            <Controls className="bg-gray-950 border-gray-800 fill-gray-300 shadow-xl hidden md:flex" />
+            <MiniMap className="bg-[#0B111A] border border-gray-800 !bottom-64 hidden lg:block" nodeColor={(n) => getColor(computed[n.id])} maskColor="#00000080" />
           </ReactFlow>
 
-          {/* BOTTOM ANALYTICS PANEL */}
-          <div className="absolute bottom-0 left-0 right-0 bg-[#06090D]/95 border-t border-cyan-900/60 backdrop-blur-xl z-20 shadow-[0_-10px_30px_rgba(0,0,0,0.8)]">
-            <div className="flex border-b border-cyan-900/40 bg-black/20">
-              {['sensitivity', 'shapley', 'mc'].map(tab => (
-                <button key={tab} onClick={() => setActiveTab(tab)}
-                  className={`px-8 py-2.5 text-xs font-mono tracking-widest transition-colors ${activeTab === tab ? 'border-b-2 border-cyan-500 text-cyan-400 bg-cyan-950/40' : 'text-gray-500 hover:text-gray-300 hover:bg-white/5'}`}>
-                  {tab === 'mc' ? 'MONTE CARLO (BETA)' : tab.toUpperCase()}
-                </button>
-              ))}
+          {/* MOBILE FAB TO OPEN LEFT SIDEBAR (If closed) */}
+          {!isLeftSidebarOpen && (
+             <button onClick={() => setIsLeftSidebarOpen(true)} className="md:hidden absolute top-4 left-4 z-20 bg-[#06090D]/90 border border-cyan-800 text-cyan-400 p-3 rounded-full shadow-[0_0_15px_rgba(0,212,255,0.2)] backdrop-blur text-xs font-bold flex items-center gap-2">
+               ☰ <span className="font-mono">INPUTS</span>
+             </button>
+          )}
+
+          {/* BOTTOM ANALYTICS PANEL (Collapsible) */}
+          <div className={`absolute bottom-0 left-0 right-0 bg-[#06090D]/95 border-t border-cyan-900/60 backdrop-blur-xl z-20 shadow-[0_-10px_30px_rgba(0,0,0,0.8)] transition-all duration-300 flex flex-col ${isBottomPanelOpen ? 'h-[50vh] md:h-72' : 'h-10 md:h-12'}`}>
+            
+            {/* Collapse Toggle Bar */}
+            <div className="w-full flex items-center justify-between px-4 py-2 border-b border-cyan-900/40 bg-black/40 cursor-pointer shrink-0" onClick={() => setIsBottomPanelOpen(!isBottomPanelOpen)}>
+               <div className="text-[10px] md:text-xs font-mono font-bold text-cyan-500 tracking-widest uppercase flex items-center gap-2">
+                 📊 Analytics Dashboard
+               </div>
+               <div className="text-cyan-500">{isBottomPanelOpen ? '▼' : '▲'}</div>
             </div>
-            <div className="p-5 h-52 overflow-y-auto custom-scrollbar">
-              {activeTab === 'sensitivity' && (
-                <div>
-                  <div className="text-xs text-cyan-600 mb-3 font-mono tracking-wider">WHICH DRIVER VARIABLES MOST DRIVE WW3 RISK RIGHT NOW? (PARTIAL DERIVATIVE)</div>
-                  <div className="grid grid-cols-2 gap-x-12 gap-y-2">
-                    {sensitivityData.slice(0, 10).map((d) => (
-                      <div key={d.id} className="flex items-center text-[11px] font-mono group">
-                        <span className="w-8 text-cyan-600 font-bold group-hover:text-cyan-400 transition">{d.id}</span>
-                        <div className="flex-1 h-2.5 bg-gray-900 rounded mx-3 overflow-hidden relative shadow-inner">
-                          <div className="h-full absolute left-0 top-0 transition-all duration-500" style={{ width: `${(d.v / sensitivityData[0].v) * 100}%`, backgroundColor: getColor(roots[d.id]) }} />
-                        </div>
-                        <span className="w-12 text-right text-gray-500">{d.v.toFixed(3)}</span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-              {activeTab === 'shapley' && (
-                <div>
-                  <div className="text-xs text-cyan-600 mb-4 font-mono tracking-wider">NORMALIZED CAUSAL CONTRIBUTION DISTRIBUTION</div>
-                  <div className="w-full h-10 flex rounded overflow-hidden shadow-2xl mb-4 border border-gray-800">
-                    {shapleyData.map(d => (
-                      <div key={d.id} style={{ width: `${d.pct}%`, backgroundColor: getColor(roots[d.id]) }} className="h-full border-r border-black/50 hover:opacity-80 transition cursor-help relative group">
-                        <div className="hidden group-hover:block absolute top-full left-1/2 -translate-x-1/2 mt-1 z-50 bg-black text-white text-[10px] font-mono p-1 rounded whitespace-nowrap">{d.id}: {d.pct.toFixed(1)}%</div>
-                      </div>
-                    ))}
-                  </div>
-                  <div className="flex flex-wrap gap-3 text-[11px] font-mono text-gray-400">
-                    {shapleyData.slice(0, 10).map(d => (
-                      <div key={d.id} className="flex items-center bg-black/40 px-2 py-1 rounded border border-gray-800">
-                        <div className="w-2.5 h-2.5 mr-2 rounded-sm shadow-sm" style={{ backgroundColor: getColor(roots[d.id]) }} />
-                        <span className="font-bold text-gray-300 mr-1">{d.id}</span> {d.pct.toFixed(1)}%
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-              {activeTab === 'mc' && (
-                <div>
-                  <button onClick={runMC} disabled={mcRunning} className="mb-4 px-6 py-2 bg-cyan-950 border border-cyan-800 text-cyan-300 text-[11px] font-mono tracking-wider rounded hover:bg-cyan-900 transition disabled:opacity-50 disabled:cursor-not-allowed shadow-lg">
-                    {mcRunning ? 'EXECUTING BETA SIMULATION...' : 'RUN MONTE CARLO (10,000 SAMPLES)'}
+
+            {/* Tabs & Content */}
+            <div className={`flex-1 flex flex-col overflow-hidden transition-opacity duration-300 ${isBottomPanelOpen ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}>
+              <div className="flex border-b border-cyan-900/40 bg-black/20 overflow-x-auto custom-scrollbar shrink-0">
+                {['sensitivity', 'shapley', 'mc'].map(tab => (
+                  <button key={tab} onClick={(e) => { e.stopPropagation(); setActiveTab(tab); }}
+                    className={`px-4 md:px-8 py-2 md:py-2.5 text-[10px] md:text-xs font-mono tracking-widest transition-colors whitespace-nowrap ${activeTab === tab ? 'border-b-2 border-cyan-500 text-cyan-400 bg-cyan-950/40' : 'text-gray-500 hover:text-gray-300 hover:bg-white/5'}`}>
+                    {tab === 'mc' ? 'MONTE CARLO (BETA)' : tab.toUpperCase()}
                   </button>
-                  {mcResults && !mcRunning && (
-                    <div className="flex space-x-12 items-center">
-                      <div className="flex-1 h-24 flex items-end border-b border-gray-800 space-x-[1px]">
-                        {Array.from({ length: 50 }).map((_, i) => {
-                          const bucketMin = i / 50; const bucketMax = (i + 1) / 50;
-                          const count = mcResults.hist.filter(v => v >= bucketMin && v < bucketMax).length;
-                          return <div key={i} className="flex-1 transition-all hover:opacity-80 cursor-help" style={{ height: `${(count / 1500) * 100}%`, backgroundColor: getColor(bucketMin) }} title={`P=${(bucketMin * 100).toFixed(0)}%: ${count} samples`} />;
-                        })}
-                      </div>
-                      <div className="font-mono text-sm space-y-2 bg-black/60 p-4 rounded-lg border border-gray-800 shadow-xl w-72">
-                        <div className="flex justify-between"><span className="text-gray-500">P05 (Optimistic):</span> <span className="text-green-500 font-bold">{(mcResults.p5 * 100).toFixed(1)}%</span></div>
-                        <div className="flex justify-between"><span className="text-gray-500">Mean Estimate:</span> <span className="text-amber-500 font-bold">{(mcResults.mean * 100).toFixed(1)}%</span></div>
-                        <div className="flex justify-between"><span className="text-gray-500">P95 (Pessimistic):</span> <span className="text-red-500 font-bold">{(mcResults.p95 * 100).toFixed(1)}%</span></div>
-                        <div className="text-[10px] text-gray-400 mt-2 pt-2 border-t border-gray-800 leading-tight">
-                          Range: {getWEP(mcResults.p5)} to {getWEP(mcResults.p95)} — Uncertainty distributed across baseline variance.
+                ))}
+              </div>
+              <div className="p-4 md:p-5 flex-1 overflow-y-auto custom-scrollbar">
+                {activeTab === 'sensitivity' && (
+                  <div>
+                    <div className="text-[10px] md:text-xs text-cyan-600 mb-3 font-mono tracking-wider">TOP DRIVERS (PARTIAL DERIVATIVE)</div>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-x-12 gap-y-3 md:gap-y-2">
+                      {sensitivityData.slice(0, 8).map((d) => (
+                        <div key={d.id} className="flex items-center text-[10px] md:text-[11px] font-mono group">
+                          <span className="w-6 md:w-8 text-cyan-600 font-bold">{d.id}</span>
+                          <div className="flex-1 h-3 md:h-2.5 bg-gray-900 rounded mx-2 md:mx-3 overflow-hidden relative shadow-inner">
+                            <div className="h-full absolute left-0 top-0 transition-all duration-500" style={{ width: `${(d.v / sensitivityData[0].v) * 100}%`, backgroundColor: getColor(roots[d.id]) }} />
+                          </div>
+                          <span className="w-10 md:w-12 text-right text-gray-500">{d.v.toFixed(3)}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {activeTab === 'shapley' && (
+                  <div>
+                    <div className="text-[10px] md:text-xs text-cyan-600 mb-4 font-mono tracking-wider">NORMALIZED CAUSAL CONTRIBUTION</div>
+                    <div className="w-full h-8 md:h-10 flex rounded overflow-hidden shadow-2xl mb-4 border border-gray-800">
+                      {shapleyData.map(d => (
+                        <div key={d.id} style={{ width: `${d.pct}%`, backgroundColor: getColor(roots[d.id]) }} className="h-full border-r border-black/50 hover:opacity-80 transition cursor-help" />
+                      ))}
+                    </div>
+                    <div className="flex flex-wrap gap-2 md:gap-3 text-[10px] md:text-[11px] font-mono text-gray-400">
+                      {shapleyData.slice(0, 8).map(d => (
+                        <div key={d.id} className="flex items-center bg-black/40 px-2 py-1 rounded border border-gray-800">
+                          <div className="w-2 md:w-2.5 h-2 md:h-2.5 mr-1.5 md:mr-2 rounded-sm shadow-sm" style={{ backgroundColor: getColor(roots[d.id]) }} />
+                          <span className="font-bold text-gray-300 mr-1">{d.id}</span> {d.pct.toFixed(1)}%
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {activeTab === 'mc' && (
+                  <div className="flex flex-col h-full">
+                    <button onClick={runMC} disabled={mcRunning} className="mb-4 px-4 md:px-6 py-2 bg-cyan-950 border border-cyan-800 text-cyan-300 text-[10px] md:text-[11px] font-mono tracking-wider rounded hover:bg-cyan-900 transition disabled:opacity-50 disabled:cursor-not-allowed shadow-lg w-full md:w-auto self-start">
+                      {mcRunning ? 'EXECUTING SIMULATION...' : 'RUN MONTE CARLO (10K SAMPLES)'}
+                    </button>
+                    {mcResults && !mcRunning && (
+                      <div className="flex flex-col md:flex-row gap-4 md:space-x-12 items-start md:items-center flex-1">
+                        <div className="w-full md:flex-1 h-16 md:h-24 flex items-end border-b border-gray-800 space-x-[1px]">
+                          {Array.from({ length: 50 }).map((_, i) => {
+                            const bucketMin = i / 50; const bucketMax = (i + 1) / 50;
+                            const count = mcResults.hist.filter(v => v >= bucketMin && v < bucketMax).length;
+                            return <div key={i} className="flex-1 transition-all" style={{ height: `${Math.max(2, (count / 1500) * 100)}%`, backgroundColor: getColor(bucketMin) }} />;
+                          })}
+                        </div>
+                        <div className="font-mono text-[11px] md:text-sm space-y-1.5 md:space-y-2 bg-black/60 p-3 md:p-4 rounded-lg border border-gray-800 shadow-xl w-full md:w-72">
+                          <div className="flex justify-between"><span className="text-gray-500">P05 (Optimistic):</span> <span className="text-green-500 font-bold">{(mcResults.p5 * 100).toFixed(1)}%</span></div>
+                          <div className="flex justify-between"><span className="text-gray-500">Mean Estimate:</span> <span className="text-amber-500 font-bold">{(mcResults.mean * 100).toFixed(1)}%</span></div>
+                          <div className="flex justify-between"><span className="text-gray-500">P95 (Pessimistic):</span> <span className="text-red-500 font-bold">{(mcResults.p95 * 100).toFixed(1)}%</span></div>
                         </div>
                       </div>
-                    </div>
-                  )}
-                </div>
-              )}
+                    )}
+                  </div>
+                )}
+              </div>
             </div>
           </div>
         </div>
 
+        {/* MOBILE OVERLAY FOR RIGHT SIDEBAR */}
+        <div className={`md:hidden fixed inset-0 bg-black/60 backdrop-blur-sm z-30 transition-opacity duration-300 ${selectedNode ? 'opacity-100' : 'opacity-0 pointer-events-none'}`} onClick={() => setSelectedNode(null)} />
+
         {/* RIGHT SIDEBAR - INSPECTOR */}
-        {selectedNode && (
-          <div className="w-[360px] bg-[#080B10]/95 backdrop-blur-xl border-l border-cyan-900/50 flex flex-col z-30 shrink-0 shadow-[-20px_0_40px_rgba(0,0,0,0.6)]">
-            <div className="p-4 border-b border-cyan-900/50 flex justify-between items-center bg-black/40">
-              <span className="font-bold text-cyan-400 tracking-wider text-sm">NODE INSPECTOR</span>
-              <button onClick={() => setSelectedNode(null)} className="text-gray-500 hover:text-white transition bg-gray-900 px-2 py-0.5 rounded text-xs">✕</button>
-            </div>
-            <div className="p-5 overflow-y-auto custom-scrollbar">
-              <div className="flex justify-between items-start mb-2">
-                 <div className="font-mono text-xs font-bold px-2 py-1 bg-cyan-950 text-cyan-400 border border-cyan-900 rounded">{selectedNode}</div>
-                 <div className="font-mono text-[10px] uppercase text-gray-500 tracking-widest">{DATA[selectedNode].t === 'R' ? 'Root Node' : DATA[selectedNode].t === 'T' ? 'Terminal Node' : DATA[selectedNode].t === 'E' ? 'Escalation Node' : 'Intermediate Node'}</div>
+        <div className={`absolute right-0 top-0 bottom-0 z-40 w-[85vw] max-w-[360px] bg-[#080B10]/95 backdrop-blur-xl border-l border-cyan-900/50 flex flex-col shadow-[-20px_0_40px_rgba(0,0,0,0.8)] transform transition-transform duration-300 ease-in-out ${selectedNode ? 'translate-x-0' : 'translate-x-full'}`}>
+          {selectedNode && (
+            <>
+              <div className="p-3 md:p-4 border-b border-cyan-900/50 flex justify-between items-center bg-black/40 shrink-0">
+                <span className="font-bold text-cyan-400 tracking-wider text-sm">NODE INSPECTOR</span>
+                <button onClick={() => setSelectedNode(null)} className="text-gray-400 hover:text-white transition bg-gray-900 px-3 py-1 md:px-2 md:py-0.5 rounded text-sm md:text-xs font-bold">✕</button>
               </div>
-              <h2 className="text-xl font-bold leading-tight mb-5 text-gray-100">{DATA[selectedNode].n}</h2>
-              <div className="text-5xl font-mono font-bold mb-6 border-b border-gray-800/80 pb-5 drop-shadow-md" style={{ color: getColor(computed[selectedNode]) }}>
-                {(computed[selectedNode] * 100).toFixed(1)}%
-              </div>
-              <div className="text-xs text-gray-300 mb-6 leading-relaxed bg-black/50 p-4 rounded-lg border border-gray-800 shadow-inner">
-                {DATA[selectedNode].txt}
-              </div>
-              {DATA[selectedNode].deps && (
-                <div className="mb-4">
-                  <div className="text-[10px] uppercase font-bold text-cyan-700 tracking-widest mb-3">Causal Parents</div>
-                  <div className="space-y-2">
-                    {Object.entries(DATA[selectedNode].deps).map(([pId, ciw]) => (
-                      <div key={pId} className="flex justify-between items-center bg-black/40 p-2.5 rounded border border-gray-800 hover:border-gray-600 transition cursor-pointer" onClick={() => setSelectedNode(pId)}>
-                        <span className="font-mono text-cyan-600 font-bold w-8">{pId}</span>
-                        <span className="text-[11px] text-gray-400 truncate flex-1 mx-2" title={DATA[pId].n}>{DATA[pId].n}</span>
-                        <div className="text-right">
-                          <div className="font-mono text-sm font-bold" style={{ color: getColor(computed[pId]) }}>{(computed[pId] * 100).toFixed(0)}%</div>
-                          <div className="text-[9px] font-mono text-amber-500/80">CIW {ciw.toFixed(2)}</div>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
+              <div className="p-4 md:p-5 overflow-y-auto custom-scrollbar flex-1 pb-32">
+                <div className="flex flex-wrap gap-2 justify-between items-start mb-3">
+                   <div className="font-mono text-xs font-bold px-2 py-1 bg-cyan-950 text-cyan-400 border border-cyan-900 rounded">{selectedNode}</div>
+                   <div className="font-mono text-[9px] md:text-[10px] uppercase text-gray-500 tracking-widest mt-1">{DATA[selectedNode].t === 'R' ? 'Root Node' : DATA[selectedNode].t === 'T' ? 'Terminal Node' : DATA[selectedNode].t === 'E' ? 'Escalation Node' : 'Intermediate Node'}</div>
                 </div>
-              )}
-            </div>
-          </div>
-        )}
+                <h2 className="text-lg md:text-xl font-bold leading-tight mb-4 text-gray-100">{DATA[selectedNode].n}</h2>
+                <div className="text-4xl md:text-5xl font-mono font-bold mb-4 md:mb-6 border-b border-gray-800/80 pb-4 drop-shadow-md" style={{ color: getColor(computed[selectedNode]) }}>
+                  {(computed[selectedNode] * 100).toFixed(1)}%
+                </div>
+                <div className="text-[11px] md:text-xs text-gray-300 mb-6 leading-relaxed bg-black/50 p-3 md:p-4 rounded-lg border border-gray-800 shadow-inner">
+                  {DATA[selectedNode].txt}
+                </div>
+                {DATA[selectedNode].deps && (
+                  <div className="mb-4">
+                    <div className="text-[10px] uppercase font-bold text-cyan-700 tracking-widest mb-3">Causal Parents</div>
+                    <div className="space-y-2">
+                      {Object.entries(DATA[selectedNode].deps).map(([pId, ciw]) => (
+                        <div key={pId} className="flex justify-between items-center bg-black/40 p-2.5 rounded border border-gray-800 hover:border-gray-600 transition cursor-pointer" onClick={() => setSelectedNode(pId)}>
+                          <span className="font-mono text-cyan-600 font-bold w-6 md:w-8 text-xs">{pId}</span>
+                          <span className="text-[10px] md:text-[11px] text-gray-400 truncate flex-1 mx-2" title={DATA[pId].n}>{DATA[pId].n}</span>
+                          <div className="text-right">
+                            <div className="font-mono text-xs md:text-sm font-bold" style={{ color: getColor(computed[pId]) }}>{(computed[pId] * 100).toFixed(0)}%</div>
+                            <div className="text-[8px] md:text-[9px] font-mono text-amber-500/80 mt-0.5">CIW {ciw.toFixed(2)}</div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </>
+          )}
+        </div>
 
         {/* INTERVENTION MODAL / SCENARIOS */}
         {showInterventions && (
-          <div className="absolute inset-0 bg-black/90 backdrop-blur-md z-50 flex justify-center items-center p-8">
-            <div className="bg-[#080B10] border border-cyan-800 rounded-xl shadow-[0_0_50px_rgba(0,212,255,0.15)] w-full max-w-5xl max-h-full flex flex-col">
-              <div className="p-5 border-b border-cyan-900/60 flex justify-between items-center bg-[#0A0E14]">
-                <h2 className="text-xl font-bold text-cyan-400 tracking-widest uppercase">DO-CALCULUS & SCENARIO CONSOLE</h2>
-                <button onClick={() => setShowInterventions(false)} className="text-gray-400 hover:text-white bg-gray-900 hover:bg-gray-800 px-3 py-1 rounded transition text-sm">✕</button>
+          <div className="absolute inset-0 bg-black/95 md:bg-black/90 backdrop-blur-lg z-50 flex justify-center items-end md:items-center p-0 md:p-8 overflow-hidden">
+            <div className="bg-[#080B10] border-t md:border border-cyan-800 md:rounded-xl shadow-[0_-10px_50px_rgba(0,212,255,0.15)] md:shadow-[0_0_50px_rgba(0,212,255,0.15)] w-full max-w-5xl max-h-[90vh] md:max-h-full flex flex-col animate-slide-in-right md:animate-none">
+              
+              <div className="p-4 md:p-5 border-b border-cyan-900/60 flex justify-between items-center bg-[#0A0E14] shrink-0">
+                <h2 className="text-lg md:text-xl font-bold text-cyan-400 tracking-widest uppercase truncate pr-4">DO-CALCULUS CONSOLE</h2>
+                <button onClick={() => setShowInterventions(false)} className="text-gray-400 hover:text-white bg-gray-900 hover:bg-gray-800 px-4 py-2 md:px-3 md:py-1 rounded transition text-sm font-bold">✕</button>
               </div>
-              <div className="flex flex-1 overflow-hidden min-h-[500px]">
-                <div className="w-1/2 border-r border-gray-800 p-6 overflow-y-auto custom-scrollbar bg-black/20">
-                  <h3 className="text-[11px] font-mono text-cyan-700 font-bold tracking-widest mb-4">PRESET SCENARIOS</h3>
-                  <div className="space-y-3">
+              
+              <div className="flex flex-col md:flex-row flex-1 overflow-hidden">
+                {/* Pre-sets */}
+                <div className="w-full md:w-[45%] border-b md:border-b-0 md:border-r border-gray-800 p-4 md:p-6 overflow-y-auto custom-scrollbar bg-black/20 shrink-0 md:shrink h-[40vh] md:h-auto">
+                  <h3 className="text-[10px] md:text-[11px] font-mono text-cyan-700 font-bold tracking-widest mb-3 md:mb-4">PRESET SCENARIOS</h3>
+                  <div className="space-y-2 md:space-y-3">
                     {Object.keys(SCENARIOS).map(s => (
-                      <button key={s} onClick={() => applyScenario(s)}
-                        className={`w-full text-left p-4 rounded-lg border text-sm transition-all shadow-sm ${activeScenario === s ? 'bg-cyan-950/60 border-cyan-500 text-cyan-100' : 'bg-[#0A0E14] border-gray-800 text-gray-400 hover:border-gray-600 hover:bg-gray-900/50'}`}>
+                      <button key={s} onClick={() => { applyScenario(s); if(window.innerWidth < 768) setShowInterventions(false); }}
+                        className={`w-full text-left p-3 md:p-4 rounded-lg border text-xs md:text-sm transition-all shadow-sm ${activeScenario === s ? 'bg-cyan-950/60 border-cyan-500 text-cyan-100' : 'bg-[#0A0E14] border-gray-800 text-gray-400 hover:border-gray-600 hover:bg-gray-900/50'}`}>
                         <div className="font-bold mb-1">{s}</div>
-                        <div className="text-[10px] font-mono text-gray-500 opacity-80">
+                        <div className="text-[9px] md:text-[10px] font-mono text-gray-500 opacity-80">
                           {SCENARIOS[s].type === 'intervene' ? 'do() Override Profile' : 'Root Baseline Shift'}
                         </div>
                       </button>
                     ))}
                   </div>
                 </div>
-                <div className="w-1/2 p-6 overflow-y-auto custom-scrollbar">
-                  <div className="flex justify-between items-center mb-5">
-                    <h3 className="text-[11px] font-mono text-cyan-700 font-bold tracking-widest">ACTIVE INTERVENTIONS do(X = p)</h3>
-                    <button onClick={() => setInterventions({})} className="text-[10px] font-mono font-bold bg-red-950/60 text-red-400 px-3 py-1.5 rounded border border-red-900 hover:bg-red-900 transition">CLEAR ALL OVERRIDES</button>
+
+                {/* Overrides */}
+                <div className="w-full md:w-[55%] p-4 md:p-6 overflow-y-auto custom-scrollbar flex flex-col h-[50vh] md:h-auto bg-[#080B10]">
+                  <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-3 md:gap-0 mb-4 md:mb-5 shrink-0">
+                    <h3 className="text-[10px] md:text-[11px] font-mono text-cyan-700 font-bold tracking-widest">ACTIVE INTERVENTIONS</h3>
+                    <button onClick={() => setInterventions({})} className="text-[9px] md:text-[10px] font-mono font-bold bg-red-950/60 text-red-400 px-3 py-2 md:py-1.5 rounded border border-red-900 hover:bg-red-900 transition w-full md:w-auto">CLEAR ALL</button>
                   </div>
-                  {Object.keys(interventions).length === 0 ? (
-                    <div className="text-sm text-gray-600 italic bg-black/30 p-4 rounded border border-gray-800/50 text-center mb-6">No nodes locked. Model is propagating organically.</div>
-                  ) : (
-                    <div className="space-y-2 mb-8">
-                      {Object.entries(interventions).map(([id, val]) => (
-                        <div key={id} className="flex justify-between items-center bg-cyan-950/20 border border-cyan-900/50 p-3 rounded-lg shadow-sm">
-                          <span className="font-mono text-cyan-300 text-xs font-bold tracking-widest">do({id} = {(val * 100).toFixed(0)}%)</span>
-                          <span className="text-[10px] text-gray-400 ml-4 flex-1 truncate">{DATA[id].n}</span>
-                          <button onClick={() => { const copy = { ...interventions }; delete copy[id]; setInterventions(copy); }} className="text-red-500 hover:text-red-400 bg-red-950/40 w-6 h-6 rounded flex justify-center items-center ml-4">✕</button>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                  <div className="bg-[#0A0E14] p-5 rounded-lg border border-gray-800 shadow-inner">
-                    <h4 className="text-[11px] font-mono text-gray-500 font-bold tracking-widest mb-4">MANUAL OVERRIDE</h4>
-                    <select id="nodeSelect" className="w-full bg-[#06090D] border border-gray-700 text-gray-200 text-xs p-3 rounded-md mb-4 font-mono outline-none focus:border-cyan-500 transition">
+                  
+                  <div className="flex-1 overflow-y-auto min-h-[100px] mb-4 md:mb-6">
+                    {Object.keys(interventions).length === 0 ? (
+                      <div className="text-xs md:text-sm text-gray-600 italic bg-black/30 p-4 rounded border border-gray-800/50 text-center">No nodes locked. Model is propagating organically.</div>
+                    ) : (
+                      <div className="space-y-2">
+                        {Object.entries(interventions).map(([id, val]) => (
+                          <div key={id} className="flex justify-between items-center bg-cyan-950/20 border border-cyan-900/50 p-2 md:p-3 rounded-lg shadow-sm">
+                            <span className="font-mono text-cyan-300 text-[10px] md:text-xs font-bold tracking-widest">do({id}={(val * 100).toFixed(0)}%)</span>
+                            <span className="text-[9px] md:text-[10px] text-gray-400 ml-3 flex-1 truncate">{DATA[id].n}</span>
+                            <button onClick={() => { const copy = { ...interventions }; delete copy[id]; setInterventions(copy); }} className="text-red-500 hover:text-red-400 bg-red-950/40 w-7 h-7 md:w-6 md:h-6 rounded flex justify-center items-center ml-2 text-xs">✕</button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="bg-[#0A0E14] p-4 md:p-5 rounded-lg border border-gray-800 shadow-inner shrink-0 mt-auto">
+                    <h4 className="text-[10px] md:text-[11px] font-mono text-gray-500 font-bold tracking-widest mb-3 md:mb-4">MANUAL OVERRIDE</h4>
+                    <select id="nodeSelect" className="w-full bg-[#06090D] border border-gray-700 text-gray-200 text-[11px] md:text-xs p-3 md:p-3 rounded-md mb-3 md:mb-4 font-mono outline-none focus:border-cyan-500 transition">
                       <option value="">-- Select specific node --</option>
                       {Object.keys(DATA).map(k => <option key={k} value={k}>[{k}] {DATA[k].n}</option>)}
                     </select>
-                    <div className="flex items-center space-x-4 mb-5">
+                    <div className="flex items-center space-x-3 md:space-x-4 mb-4 md:mb-5">
                       <input type="range" id="nodeVal" min="0" max="1" step="0.01" defaultValue="0.5" className="flex-1 accent-cyan-500 h-1.5 bg-gray-900 rounded-lg cursor-pointer" />
-                      <span className="text-xs font-mono w-12 text-right text-gray-400" id="valDisplay">50%</span>
                     </div>
                     <button onClick={() => {
                       const id = document.getElementById('nodeSelect').value;
@@ -624,13 +648,16 @@ export default function BBNApp() {
                         setInterventions(p => ({ ...p, [id]: parseFloat(document.getElementById('nodeVal').value) }));
                         setActiveScenario("Custom");
                       }
-                    }} className="w-full bg-cyan-900/80 hover:bg-cyan-800 text-cyan-100 text-xs font-mono font-bold py-3 rounded-md transition tracking-wider shadow-md">APPLY do() OPERATOR</button>
+                    }} className="w-full bg-cyan-900/80 hover:bg-cyan-800 text-cyan-100 text-xs font-mono font-bold py-3 md:py-3 rounded-md transition tracking-wider shadow-md active:scale-95">
+                      APPLY do() OPERATOR
+                    </button>
                   </div>
                 </div>
               </div>
             </div>
           </div>
         )}
+
       </div>
     </div>
   );
