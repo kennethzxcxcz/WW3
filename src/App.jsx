@@ -236,7 +236,7 @@ const edgeTypes = { custom: CustomEdge };
 
 // === SCENARIOS ===
 const SCENARIOS = {
-  "Status Quo — March 2026 Baseline": { type: 'roots', vals: { R1:0.45, R2:0.55, R3:0.50, R4:0.40, R5:0.35, R6:0.45, R7:0.60, R8:0.55, R9:0.40, R10:0.50, R11:0.35, R12:0.30, R13:0.55, R14:0.40, R15:0.35 } },
+  "Status Quo — March 2026 Baseline": { type: 'roots', vals: { R1:0.60, R2:0.40, R3:0.55, R4:0.40, R5:0.50, R6:0.25, R7:0.40, R8:0.60, R9:0.40, R10:0.55, R11:0.30, R12:0.25, R13:0.50, R14:0.30, R15:0.30 } },
   "Iranian Nuclear Breakout": { type: 'intervene', vals: { R2:0.9, R1:0.7, R15:0.65 } },
   "Taiwan Strait Kinetic Crisis 2026": { type: 'intervene', vals: { R8:0.85, R3:0.6, I10:0.85 } },
   "Russian NATO Direct Strike": { type: 'intervene', vals: { R7:0.9, E2:0.75, I4:0.7 } },
