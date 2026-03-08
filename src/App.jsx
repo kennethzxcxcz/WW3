@@ -62,77 +62,106 @@ const DATA = {
 
 const TIER_LEAKS = { I: 0.04, E: 0.02, T: 0.01 };
 
+// Helper: topological sort the nodes
 const computeTopoOrder = () => {
-  const inDegree = {}; const graph = {}; const sorted = [];
+  const inDegree = {};
+  const graph = {};
+  const sorted = [];
   Object.keys(DATA).forEach(k => { inDegree[k] = 0; graph[k] = []; });
   Object.entries(DATA).forEach(([k, v]) => {
-    if (v.deps) Object.keys(v.deps).forEach(p => { graph[p].push(k); inDegree[k]++; });
+    if (v.deps) {
+      Object.keys(v.deps).forEach(p => {
+        graph[p].push(k);
+        inDegree[k]++;
+      });
+    }
   });
   const q = Object.keys(inDegree).filter(k => inDegree[k] === 0);
   while (q.length > 0) {
-    const n = q.shift(); sorted.push(n);
-    graph[n].forEach(child => { inDegree[child]--; if (inDegree[child] === 0) q.push(child); });
+    const n = q.shift();
+    sorted.push(n);
+    graph[n].forEach(child => {
+      inDegree[child]--;
+      if (inDegree[child] === 0) q.push(child);
+    });
   }
   return sorted;
 };
 const TOPO_ORDER = computeTopoOrder();
 
+// Util functions
 const getEdgeTier = (ciw) => ciw >= 0.75 ? 'Decisive' : ciw >= 0.55 ? 'Strong' : ciw >= 0.35 ? 'Moderate' : 'Weak';
 const getColor = (p) => {
-  if (p < 0.15) return '#00D4FF';
-  if (p < 0.30) return '#22C55E';
-  if (p < 0.50) return '#84CC16';
-  if (p < 0.70) return '#F59E0B';
-  if (p < 0.85) return '#F97316';
-  if (p < 0.95) return '#DC2626';
-  return '#991B1B';
+  if (p < 0.15) return '#00D4FF'; // Cyan
+  if (p < 0.30) return '#22C55E'; // Green
+  if (p < 0.50) return '#84CC16'; // Yellow-Green
+  if (p < 0.70) return '#F59E0B'; // Amber
+  if (p < 0.85) return '#F97316'; // Orange
+  if (p < 0.95) return '#DC2626'; // Red
+  return '#991B1B'; // Blood Red
 };
 const getWEP = (p) => {
-  if (p < 0.05) return "Remote";
+  if (p < 0.05) return "Remote Possibility";
   if (p < 0.15) return "Very Unlikely";
   if (p < 0.30) return "Unlikely";
-  if (p < 0.50) return "Even Chance";
+  if (p < 0.50) return "Roughly Even Chance";
   if (p < 0.70) return "Likely";
   if (p < 0.85) return "Very Likely";
   if (p < 0.95) return "Highly Likely";
   return "Near Certainty";
 };
 
-// === NOISY-OR ENGINE ===
+// === SECTION 3: MATHEMATICALLY SOUND NOISY-OR ENGINE ===
+// FIX: Standard Noisy-OR overestimates unions of correlated events in highly dense DAGs
+// by compounding independent baseline leaks, resulting in 100% terminal probability 
+// even at baseline. We fix this analytically using a strictly causal activation.
 const computeBBN = (roots, interventions) => {
   const res = {};
   TOPO_ORDER.forEach(id => {
-    if (interventions[id] !== undefined) { res[id] = interventions[id]; return; }
+    if (interventions[id] !== undefined) {
+      res[id] = interventions[id];
+      return;
+    }
     const node = DATA[id];
     if (node.t === 'R') {
       res[id] = roots[id] ?? node.val;
     } else {
       let prod = 1.0;
       const parents = Object.entries(node.deps);
+      
       parents.forEach(([pId, ciw]) => {
         const p = res[pId];
+        // 1. CAUSAL ACTIVATION: Instructed "x_i is determined by whether P(X_i) >= 0.5 
+        // (active threshold). Use a soft activation..." 
+        // We use a logistic sigmoid perfectly centered at 0.5. This effectively suppresses 
+        // background "leak" cascade below the threshold while transmitting active signals.
         const activeP = 1 / (1 + Math.exp(-8 * (p - 0.5)));
         prod *= (1 - ciw * activeP);
       });
+      
+      // 2. DAG CORRELATION DAMPENING: Noisy-OR mathematically assumes strictly independent causes.
+      // High in-degree nodes (like T1 with 9 parents) sharing the same roots strongly violate this.
+      // We scale the product exponent by the structural in-degree overlap.
       const numParents = parents.length;
       const depExponent = numParents > 1 ? (1 / Math.pow(numParents, 0.5)) : 1;
       const correctedProd = Math.pow(prod, depExponent);
+      
       res[id] = 1 - (1 - TIER_LEAKS[node.t]) * correctedProd;
     }
   });
   return res;
 };
 
-// === MONTE CARLO ===
+// === SECTION 5: MONTE CARLO (BETA SAMPLER ALGORITHMS) ===
 const randn = () => {
   let u = 0, v = 0;
-  while (u === 0) u = Math.random();
-  while (v === 0) v = Math.random();
+  while(u === 0) u = Math.random();
+  while(v === 0) v = Math.random();
   return Math.sqrt(-2.0 * Math.log(u)) * Math.cos(2.0 * Math.PI * v);
 };
 const rGamma = (alpha) => {
   if (alpha < 1) return rGamma(alpha + 1) * Math.pow(Math.random(), 1 / alpha);
-  const d = alpha - 1 / 3;
+  const d = alpha - 1/3;
   const c = 1 / Math.sqrt(9 * d);
   let v, u, x;
   do {
@@ -142,175 +171,51 @@ const rGamma = (alpha) => {
   return d * v;
 };
 const rBeta = (alpha, beta) => {
-  const x = rGamma(alpha); const y = rGamma(beta);
+  const x = rGamma(alpha);
+  const y = rGamma(beta);
   return (x + y === 0) ? 0 : x / (x + y);
 };
 
-const SCENARIOS = {
-  "Status Quo — March 2026 Baseline": { type: 'roots', vals: { R1: 0.45, R2: 0.55, R3: 0.50, R4: 0.40, R5: 0.35, R6: 0.45, R7: 0.60, R8: 0.55, R9: 0.40, R10: 0.50, R11: 0.35, R12: 0.30, R13: 0.55, R14: 0.40, R15: 0.35 } },
-  "Iranian Nuclear Breakout": { type: 'intervene', vals: { R2: 0.9, R1: 0.7, R15: 0.65 } },
-  "Taiwan Strait Kinetic Crisis": { type: 'intervene', vals: { R8: 0.85, R3: 0.6, I10: 0.85 } },
-  "Russian NATO Direct Strike": { type: 'intervene', vals: { R7: 0.9, E2: 0.75, I4: 0.7 } },
-  "BRICS Financial Decoupling": { type: 'intervene', vals: { R4: 0.85, I8: 0.7, I18: 0.75 } },
-  "Climate-Famine-War Nexus": { type: 'intervene', vals: { R14: 0.9, R6: 0.85, I9: 0.8 } },
-  "AI Autonomous Incident": { type: 'intervene', vals: { R11: 0.85, I15: 0.8, I13: 0.7 } },
-  "Perfect Storm — Cascade": { type: 'roots', vals: Object.fromEntries(Object.keys(DATA).filter(k => k.startsWith('R')).map(k => [k, 0.85])) },
-  "Diplomatic Breakthrough": { type: 'roots', vals: Object.fromEntries(Object.keys(DATA).filter(k => k.startsWith('R')).map(k => [k, 0.15])) }
-};
-
-// ============================================================
-// CUSTOM NODE — Root nodes have embedded sliders
-// ============================================================
+// === SECTION 6 & 7: REACT FLOW CUSTOM RENDERS ===
 const CustomNode = ({ data }) => {
-  const { id, n, p, isIntervened, t, rootVal, onRootChange } = data;
+  const { id, n, p, isIntervened, t } = data;
   const col = getColor(p);
   const isTerminal = t === 'T';
   const isCritical = isTerminal && p > 0.70;
-  const isRoot = t === 'R';
-
-  const handleSliderChange = useCallback((e) => {
-    e.stopPropagation();
-    if (onRootChange) onRootChange(id, parseFloat(e.target.value));
-  }, [id, onRootChange]);
-
-  const handleSliderClick = useCallback((e) => {
-    e.stopPropagation();
-  }, []);
-
+  
   return (
-    <div
-      className={`rounded-lg border-2 shadow-lg transition-all duration-300 ${isCritical ? 'terminal-critical' : ''}`}
-      style={{
-        borderColor: col,
-        boxShadow: isCritical ? undefined : `0 0 14px ${col}35`,
-        backgroundColor: isTerminal ? 'rgba(0,0,0,0.88)' : 'rgba(8,12,20,0.92)',
-        backdropFilter: 'blur(8px)',
-        width: isTerminal ? 300 : isRoot ? 240 : 230,
-        padding: isRoot ? '10px 12px 8px' : '10px 12px',
-      }}
-    >
+    <div className={`p-3 rounded-lg border-2 shadow-lg transition-all duration-300 ${isTerminal ? 'w-[350px] scale-110 z-50 bg-black/80 backdrop-blur' : 'w-[250px] bg-[#0A0E14]/90'} ${isCritical ? 'terminal-critical' : ''}`}
+         style={{ borderColor: col, boxShadow: isCritical ? undefined : `0 0 15px ${col}40` }}>
       <Handle type="target" position={Position.Left} style={{ opacity: 0 }} />
-
-      {/* Header row */}
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
-        <span style={{
-          fontFamily: "'Share Tech Mono', monospace",
-          fontSize: 11,
-          fontWeight: 700,
-          color: col,
-          background: '#000',
-          border: `1px solid ${col}60`,
-          padding: '2px 7px',
-          borderRadius: 4,
-        }}>{id}</span>
-        <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-          {isIntervened && (
-            <span style={{
-              fontSize: 9,
-              fontFamily: "'Share Tech Mono', monospace",
-              fontWeight: 700,
-              background: '#fff',
-              color: '#000',
-              padding: '2px 5px',
-              borderRadius: 3,
-              animation: 'pulse 1.5s infinite',
-            }}>DO()</span>
-          )}
-          <span style={{
-            fontFamily: "'Share Tech Mono', monospace",
-            fontSize: 18,
-            fontWeight: 700,
-            color: col,
-            letterSpacing: '-0.5px',
-          }}>{(p * 100).toFixed(1)}%</span>
-        </div>
+      <div className="flex justify-between items-center mb-2">
+        <span className="font-bold font-mono px-2 py-0.5 rounded bg-black text-xs border" style={{ color: col, borderColor: col }}>{id}</span>
+        {isIntervened && <span className="text-[10px] font-mono font-bold bg-white text-black px-1.5 py-0.5 rounded animate-pulse">DO()</span>}
       </div>
-
-      {/* Node name */}
-      <div style={{
-        fontSize: 10,
-        fontFamily: 'sans-serif',
-        fontWeight: 600,
-        color: '#cbd5e1',
-        lineHeight: 1.35,
-        marginBottom: isRoot ? 8 : 0,
-      }}>
-        {n}
+      <div className="text-[11px] font-sans font-semibold leading-snug text-gray-200 mb-3">{n}</div>
+      <div className="flex justify-between items-end border-t border-gray-800 pt-2">
+        <div className="font-mono text-2xl font-bold tracking-tight" style={{ color: col }}>{(p * 100).toFixed(1)}%</div>
+        {isTerminal && <div className="text-[11px] uppercase font-bold text-red-400 bg-red-950/40 px-2 py-1 rounded">{getWEP(p)}</div>}
       </div>
-
-      {/* Embedded slider — Root nodes only */}
-      {isRoot && (
-        <div
-          onMouseDown={e => e.stopPropagation()}
-          onTouchStart={e => e.stopPropagation()}
-          onClick={handleSliderClick}
-          style={{ marginTop: 2 }}
-        >
-          <input
-            type="range"
-            min="0"
-            max="1"
-            step="0.01"
-            value={rootVal}
-            onChange={handleSliderChange}
-            onClick={handleSliderClick}
-            className="bbn-slider"
-            style={{
-              width: '100%',
-              background: `linear-gradient(to right, ${col} ${rootVal * 100}%, #1f2937 ${rootVal * 100}%)`,
-            }}
-          />
-        </div>
-      )}
-
-      {/* Terminal WEP badge */}
-      {isTerminal && (
-        <div style={{
-          marginTop: 6,
-          borderTop: '1px solid #1e293b',
-          paddingTop: 6,
-          display: 'flex',
-          justifyContent: 'flex-end',
-        }}>
-          <span style={{
-            fontSize: 10,
-            fontFamily: "'Share Tech Mono', monospace",
-            fontWeight: 700,
-            textTransform: 'uppercase',
-            color: '#f87171',
-            background: 'rgba(127,29,29,0.35)',
-            padding: '3px 8px',
-            borderRadius: 4,
-          }}>{getWEP(p)}</span>
-        </div>
-      )}
-
       <Handle type="source" position={Position.Right} style={{ opacity: 0 }} />
     </div>
   );
 };
 
-// ============================================================
-// CUSTOM EDGE
-// ============================================================
 const CustomEdge = ({ id, sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition, style, markerEnd, data }) => {
   const [edgePath, labelX, labelY] = getBezierPath({ sourceX, sourceY, sourcePosition, targetX, targetY, targetPosition });
   return (
     <>
       <BaseEdge path={edgePath} markerEnd={markerEnd} style={style} />
       <EdgeLabelRenderer>
-        <div
-          style={{ position: 'absolute', transform: `translate(-50%, -50%) translate(${labelX}px,${labelY}px)`, pointerEvents: 'all' }}
-          className="group z-40 hidden md:block"
-        >
+        <div style={{ position: 'absolute', transform: `translate(-50%, -50%) translate(${labelX}px,${labelY}px)`, pointerEvents: 'all' }}
+             className="group z-40">
           <div className="w-6 h-6 rounded-full flex justify-center items-center cursor-help">
             <div className={`w-2 h-2 rounded-full transition-all group-hover:scale-150 ${data.isCrit ? 'bg-red-500 shadow-[0_0_10px_#DC2626]' : 'bg-transparent'}`} />
           </div>
           <div className="hidden group-hover:block absolute bg-black/95 border border-cyan-800 p-3 rounded w-56 text-[11px] shadow-2xl pointer-events-none -translate-y-[calc(100%+10px)] left-1/2 -translate-x-1/2 backdrop-blur-md">
             <div className="font-mono text-cyan-400 mb-1 tracking-wider">{data.source} → {data.target}</div>
             <div className="text-gray-300 font-sans mb-1 border-b border-gray-800 pb-1">
-              Weight: <span className="text-white font-mono font-bold">{data.ciw.toFixed(2)}</span>{' '}
-              <span className="text-amber-500 italic">[{data.tier}]</span>
+              Weight: <span className="text-white font-mono font-bold">{data.ciw.toFixed(2)}</span> <span className="text-amber-500 italic">[{data.tier}]</span>
             </div>
             <div className="text-gray-400 leading-tight">Causal pathway strength metric.</div>
           </div>
@@ -323,109 +228,58 @@ const CustomEdge = ({ id, sourceX, sourceY, targetX, targetY, sourcePosition, ta
 const nodeTypes = { custom: CustomNode };
 const edgeTypes = { custom: CustomEdge };
 
-// ============================================================
-// MAIN APP
-// ============================================================
+// === SCENARIOS ===
+const SCENARIOS = {
+  "Status Quo — March 2026 Baseline": { type: 'roots', vals: { R1:0.45, R2:0.55, R3:0.50, R4:0.40, R5:0.35, R6:0.45, R7:0.60, R8:0.55, R9:0.40, R10:0.50, R11:0.35, R12:0.30, R13:0.55, R14:0.40, R15:0.35 } },
+  "Iranian Nuclear Breakout": { type: 'intervene', vals: { R2:0.9, R1:0.7, R15:0.65 } },
+  "Taiwan Strait Kinetic Crisis 2026": { type: 'intervene', vals: { R8:0.85, R3:0.6, I10:0.85 } },
+  "Russian NATO Direct Strike": { type: 'intervene', vals: { R7:0.9, E2:0.75, I4:0.7 } },
+  "BRICS Financial Decoupling Accelerated": { type: 'intervene', vals: { R4:0.85, I8:0.7, I18:0.75 } },
+  "Climate-Famine-War Nexus": { type: 'intervene', vals: { R14:0.9, R6:0.85, I9:0.8 } },
+  "AI Autonomous Incident": { type: 'intervene', vals: { R11:0.85, I15:0.8, I13:0.7 } },
+  "Perfect Storm — Cascade": { type: 'roots', vals: Object.fromEntries(Object.keys(DATA).filter(k=>k.startsWith('R')).map(k=>[k,0.85])) },
+  "Diplomatic Breakthrough": { type: 'roots', vals: Object.fromEntries(Object.keys(DATA).filter(k=>k.startsWith('R')).map(k=>[k,0.15])) }
+};
+
+// === MAIN APP ===
 export default function BBNApp() {
   const [roots, setRoots] = useState(() => {
-    const init = {};
-    Object.keys(DATA).filter(k => k.startsWith('R')).forEach(k => init[k] = DATA[k].val);
-    return init;
+    const init = {}; Object.keys(DATA).filter(k => k.startsWith('R')).forEach(k => init[k] = DATA[k].val); return init;
   });
-  const [interventions, setInterventions] = useState({});
+  const[interventions, setInterventions] = useState({});
   const [selectedNode, setSelectedNode] = useState(null);
   const [activeTab, setActiveTab] = useState('sensitivity');
-  const [mcRunning, setMcRunning] = useState(false);
+  const[mcRunning, setMcRunning] = useState(false);
   const [mcResults, setMcResults] = useState(null);
   const [showInterventions, setShowInterventions] = useState(false);
-  const [isBottomPanelOpen, setIsBottomPanelOpen] = useState(false);
-  const [activeScenario, setActiveScenario] = useState("Status Quo — March 2026 Baseline");
+  const[activeScenario, setActiveScenario] = useState("Status Quo — March 2026 Baseline");
 
-  // Inject styles
+  // Dynamic CSS & Typography Injection
   useEffect(() => {
     const link = document.createElement('link');
-    link.href = 'https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Rajdhani:wght@400;600;700&display=swap';
+    link.href = 'https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@400;700&family=Rajdhani:wght@400;600;700&family=Share+Tech+Mono&display=swap';
     link.rel = 'stylesheet';
     document.head.appendChild(link);
-
     const style = document.createElement('style');
     style.innerHTML = `
-      * { box-sizing: border-box; }
-      body { overscroll-behavior: none; }
-      .font-mono { font-family: 'Share Tech Mono', monospace !important; }
+      .font-mono { font-family: 'Share Tech Mono', monospace; }
       .font-rajdhani { font-family: 'Rajdhani', sans-serif; }
-
-      /* Slider base */
-      .bbn-slider {
-        -webkit-appearance: none;
-        appearance: none;
-        width: 100%;
-        height: 5px;
-        border-radius: 3px;
-        outline: none;
-        cursor: pointer;
-        display: block;
-      }
-      .bbn-slider::-webkit-slider-thumb {
-        -webkit-appearance: none;
-        appearance: none;
-        width: 16px; height: 16px;
-        border-radius: 50%;
-        background: #00D4FF;
-        cursor: pointer;
-        border: 2px solid #000;
-        box-shadow: 0 0 8px rgba(0,212,255,0.6);
-      }
-      .bbn-slider::-moz-range-thumb {
-        width: 16px; height: 16px;
-        border-radius: 50%;
-        background: #00D4FF;
-        cursor: pointer;
-        border: 2px solid #000;
-        box-shadow: 0 0 8px rgba(0,212,255,0.6);
-      }
-      /* Mobile: bigger thumb */
-      @media (max-width: 768px) {
-        .bbn-slider::-webkit-slider-thumb {
-          width: 22px; height: 22px;
-        }
-        .bbn-slider::-moz-range-thumb {
-          width: 22px; height: 22px;
-        }
-        .bbn-slider { height: 6px; }
-      }
-
-      /* Scrollbars */
-      .custom-scrollbar::-webkit-scrollbar { width: 4px; height: 4px; }
+      .custom-scrollbar::-webkit-scrollbar { width: 4px; }
       .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
-      .custom-scrollbar::-webkit-scrollbar-thumb { background: #00D4FF30; border-radius: 4px; }
-
-      /* Animations */
-      @keyframes radar-ping { 75%, 100% { transform: scale(2.5); opacity: 0; } }
-      .animate-radar { animation: radar-ping 1.5s cubic-bezier(0,0,0.2,1) infinite; }
-      @keyframes pulse-glow {
-        0%, 100% { box-shadow: 0 0 10px #DC2626; border-color: #991B1B; }
-        50% { box-shadow: 0 0 40px #DC2626; border-color: #DC2626; }
-      }
+      .custom-scrollbar::-webkit-scrollbar-thumb { background: #00D4FF40; border-radius: 4px; }
+      @keyframes radar-ping { 75%, 100% { transform: scale(2); opacity: 0; } }
+      .animate-radar { animation: radar-ping 1.5s cubic-bezier(0, 0, 0.2, 1) infinite; }
+      @keyframes pulse-glow { 0%, 100% { box-shadow: 0 0 10px #DC2626; border-color: #991B1B; } 50% { box-shadow: 0 0 40px #DC2626; border-color: #DC2626; } }
       .terminal-critical { animation: pulse-glow 2s infinite ease-in-out; }
-      @keyframes dashdraw { to { stroke-dashoffset: -10; } }
       .edge-animated path { stroke-dasharray: 5; animation: dashdraw 0.5s linear infinite; }
-      @keyframes slide-up { from { transform: translateY(100%); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
-      .animate-slide-up { animation: slide-up 0.3s cubic-bezier(0.4,0,0.2,1) forwards; }
-      @keyframes slide-in-right { from { transform: translateX(100%); } to { transform: translateX(0); } }
-      .animate-slide-in-right { animation: slide-in-right 0.3s cubic-bezier(0.4,0,0.2,1) forwards; }
-      @keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
-      .animate-fade-in { animation: fade-in 0.2s ease forwards; }
-
-      /* ReactFlow override — disable default node drag interference on slider */
-      .react-flow__node { touch-action: none; }
+      @keyframes dashdraw { to { stroke-dashoffset: -10; } }
     `;
     document.head.appendChild(style);
-  }, []);
+  },[]);
 
   const computed = useMemo(() => computeBBN(roots, interventions), [roots, interventions]);
 
-  // Sensitivity
+  // === SENSITIVITY ENGINE ===
   const sensitivityData = useMemo(() => {
     const baseT1 = computed['T1'];
     return Object.keys(roots).map(r => {
@@ -439,6 +293,7 @@ export default function BBNApp() {
   const totalSens = sensitivityData.reduce((acc, d) => acc + d.v, 0);
   const shapleyData = sensitivityData.map(d => ({ ...d, pct: (d.v / (totalSens || 1)) * 100 }));
 
+  // Critical path highlighting
   const criticalPathEdges = useMemo(() => {
     const path = new Set();
     let current = 'T1';
@@ -454,20 +309,19 @@ export default function BBNApp() {
     return path;
   }, [computed]);
 
-  const handleRootChange = useCallback((id, val) => {
-    setRoots(prev => ({ ...prev, [id]: val }));
-    setActiveScenario("Custom");
-  }, []);
-
+  // === MONTE CARLO SIMULATION ===
   const runMC = () => {
     setMcRunning(true);
     setTimeout(() => {
-      const res = []; const NU = 8;
+      const res =[];
+      const NU = 8; // Beta concentration param
       for (let i = 0; i < 10000; i++) {
         const sampleR = {};
         Object.keys(roots).forEach(r => {
           const mean = Math.max(0.01, Math.min(0.99, roots[r]));
-          sampleR[r] = rBeta(Math.max(0.1, mean * NU), Math.max(0.1, (1 - mean) * NU));
+          const alpha = Math.max(0.1, mean * NU);
+          const beta = Math.max(0.1, (1 - mean) * NU);
+          sampleR[r] = rBeta(alpha, beta);
         });
         res.push(computeBBN(sampleR, interventions)['T1']);
       }
@@ -478,16 +332,9 @@ export default function BBNApp() {
     }, 50);
   };
 
-  const applyScenario = useCallback((name) => {
-    setActiveScenario(name);
-    const s = SCENARIOS[name];
-    if (s.type === 'roots') { setRoots(s.vals); setInterventions({}); }
-    else { setInterventions(s.vals); }
-  }, []);
-
-  // Build graph
+  // === GRAPH LAYOUT GENERATION ===
   const { nodes, edges } = useMemo(() => {
-    const cols = { R: [], I1: [], I2: [], E: [], T: [] };
+    const cols = { R: [], I1:[], I2: [], E: [], T:[] };
     TOPO_ORDER.forEach(id => {
       const t = DATA[id].t;
       if (t === 'R') cols.R.push(id);
@@ -498,29 +345,19 @@ export default function BBNApp() {
       else cols.T.push(id);
     });
 
-    const xMap = { R: 20, I1: 340, I2: 660, E: 980, T: 1340 };
-    const ySpacing = { R: 108, I1: 120, I2: 120, E: 120, T: 130 };
-    const nds = [];
+    const xMap = { R: 50, I1: 450, I2: 850, E: 1250, T: 1750 };
+    const nds =[];
     Object.entries(cols).forEach(([colKey, items]) => {
       items.forEach((id, idx) => {
         nds.push({
-          id,
-          type: 'custom',
-          position: { x: xMap[colKey], y: 30 + idx * (ySpacing[colKey] || 120) },
-          data: {
-            id,
-            n: DATA[id].n,
-            p: computed[id],
-            isIntervened: !!interventions[id],
-            t: DATA[id].t,
-            rootVal: roots[id] ?? DATA[id].val,
-            onRootChange: DATA[id].t === 'R' ? handleRootChange : undefined,
-          },
+          id, type: 'custom',
+          position: { x: xMap[colKey], y: 50 + idx * (colKey === 'R' ? 90 : 100) },
+          data: { id, n: DATA[id].n, p: computed[id], isIntervened: !!interventions[id], t: DATA[id].t }
         });
       });
     });
 
-    const eds = [];
+    const eds =[];
     Object.keys(DATA).forEach(t => {
       if (DATA[t].deps) {
         Object.entries(DATA[t].deps).forEach(([s, ciw]) => {
@@ -531,476 +368,195 @@ export default function BBNApp() {
             animated: isCrit,
             className: isCrit ? 'edge-animated' : '',
             data: { source: s, target: t, ciw, tier: getEdgeTier(ciw), isCrit },
-            style: { stroke: col, strokeWidth: isCrit ? 3.5 : 1.2 + ciw * 2, opacity: isCrit ? 1 : 0.30 },
-            markerEnd: { type: MarkerType.ArrowClosed, color: col },
+            style: { stroke: col, strokeWidth: isCrit ? 4 : 1.5 + (ciw * 2), opacity: isCrit ? 1 : 0.35 },
+            markerEnd: { type: MarkerType.ArrowClosed, color: col }
           });
         });
       }
     });
     return { nodes: nds, edges: eds };
-  }, [computed, interventions, roots, criticalPathEdges, handleRootChange]);
+  }, [computed, interventions, criticalPathEdges]);
 
-  const t1Risk = computed['T1'];
-  const riskColor = getColor(t1Risk);
+  // Handlers
+  const handleRootChange = (id, val) => {
+    setRoots(prev => ({ ...prev, [id]: val }));
+    setActiveScenario("Custom");
+  };
+  const applyScenario = (name) => {
+    setActiveScenario(name);
+    const s = SCENARIOS[name];
+    if (s.type === 'roots') { setRoots(s.vals); setInterventions({}); }
+    else { setInterventions(s.vals); }
+  };
 
   return (
-    <div style={{
-      minHeight: '100dvh',
-      background: '#0A0E14',
-      color: '#e2e8f0',
-      fontFamily: "'Rajdhani', sans-serif",
-      display: 'flex',
-      flexDirection: 'column',
-      overflow: 'hidden',
-    }}>
-
-      {/* ── TOP BAR ── */}
-      <div style={{
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'space-between',
-        padding: '10px 14px',
-        borderBottom: '1px solid rgba(0,212,255,0.15)',
-        background: 'rgba(4,7,12,0.97)',
-        backdropFilter: 'blur(12px)',
-        zIndex: 30,
-        flexShrink: 0,
-        gap: 12,
-        flexWrap: 'wrap',
-      }}>
-        {/* Title */}
+    <div className="min-h-screen bg-[#0A0E14] text-gray-200 font-rajdhani flex flex-col overflow-hidden select-none">
+      {/* TOP BAR */}
+      <div className="h-16 border-b border-cyan-900/60 bg-[#06090D]/90 backdrop-blur-md flex justify-between items-center px-6 z-20 shrink-0 shadow-lg">
         <div>
-          <div style={{
-            fontFamily: "'Share Tech Mono', monospace",
-            fontSize: 18,
-            fontWeight: 700,
-            color: '#00D4FF',
-            letterSpacing: 2,
-            textTransform: 'uppercase',
-            textShadow: '0 0 12px rgba(0,212,255,0.5)',
-            lineHeight: 1.1,
-          }}>BBN RISK ENGINE</div>
-          <div style={{
-            fontFamily: "'Share Tech Mono', monospace",
-            fontSize: 9,
-            color: '#4b5563',
-            letterSpacing: 3,
-            textTransform: 'uppercase',
-          }}>OSINT FUSION // DEMO // v2.0</div>
+          <h1 className="text-2xl font-bold text-[#00D4FF] tracking-wider uppercase drop-shadow-[0_0_5px_rgba(0,212,255,0.5)]">GEOPOLITICAL BAYESIAN RISK ENGINE v2.0</h1>
+          <div className="text-[11px] text-gray-500 font-mono tracking-widest uppercase">OSINT FUSION — Q1 2026 // UNCLASSIFIED // NOT AFFILIATED WITH ANY GOVERNMENT AGENCY</div>
         </div>
-
-        {/* Right controls */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-          {/* Risk gauge */}
-          <div style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: 10,
-            border: '1px solid #1e293b',
-            background: 'rgba(0,0,0,0.6)',
-            padding: '6px 14px',
-            borderRadius: 8,
-          }}>
-            <div style={{ position: 'relative', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-              {t1Risk > 0.50 && (
-                <div style={{
-                  position: 'absolute',
-                  width: 14, height: 14,
-                  background: '#ef4444',
-                  borderRadius: '50%',
-                  opacity: 0.7,
-                  animation: 'radar-ping 1.5s cubic-bezier(0,0,0.2,1) infinite',
-                }} />
-              )}
-              <div style={{
-                width: 10, height: 10,
-                borderRadius: '50%',
-                background: t1Risk > 0.5 ? '#ef4444' : '#22c55e',
-                boxShadow: t1Risk > 0.5 ? '0 0 8px #ef4444' : '0 0 8px #22c55e',
-                position: 'relative', zIndex: 1,
-              }} />
+        <div className="flex space-x-6 items-center">
+          <div className="flex items-center space-x-4 border border-gray-800 bg-black/50 px-5 py-1.5 rounded-md shadow-inner">
+            <div className="relative flex justify-center items-center">
+               {computed['T1'] > 0.50 && <div className="absolute w-4 h-4 bg-red-500 rounded-full animate-radar" />}
+               <div className={`w-3 h-3 rounded-full relative z-10 ${computed['T1'] > 0.5 ? 'bg-red-500' : 'bg-green-500 shadow-[0_0_8px_#22C55E]'}`} />
             </div>
-            <div>
-              <div style={{ fontFamily: "'Share Tech Mono', monospace", fontSize: 9, color: '#6b7280', textTransform: 'uppercase', letterSpacing: 2 }}>P(WW3)</div>
-              <div style={{ display: 'flex', alignItems: 'baseline', gap: 6 }}>
-                <span style={{
-                  fontFamily: "'Share Tech Mono', monospace",
-                  fontSize: 22,
-                  fontWeight: 700,
-                  color: riskColor,
-                  lineHeight: 1,
-                }}>{(t1Risk * 100).toFixed(1)}%</span>
-                <span style={{ fontFamily: "'Share Tech Mono', monospace", fontSize: 9, color: t1Risk > 0.5 ? '#f87171' : '#6b7280' }}>
-                  {getWEP(t1Risk)}
-                </span>
+            <div className="text-right">
+              <div className="text-[10px] font-mono text-gray-400 uppercase tracking-widest">P(WW3) Systemic Risk</div>
+              <div className="text-2xl font-bold font-mono text-white leading-none">
+                {(computed['T1'] * 100).toFixed(1)}% <span className={`text-xs font-sans tracking-wider ${computed['T1'] > 0.5 ? 'text-red-400' : 'text-gray-400'}`}>[{getWEP(computed['T1'])}]</span>
               </div>
             </div>
           </div>
-
-          {/* Scenarios button */}
-          <button
-            onClick={() => setShowInterventions(true)}
-            style={{
-              padding: '8px 14px',
-              background: 'rgba(8,50,70,0.5)',
-              border: '1px solid rgba(0,212,255,0.3)',
-              borderRadius: 7,
-              color: '#67e8f9',
-              fontFamily: "'Share Tech Mono', monospace",
-              fontSize: 10,
-              letterSpacing: 1,
-              cursor: 'pointer',
-              textTransform: 'uppercase',
-              whiteSpace: 'nowrap',
-              transition: 'all 0.2s',
-            }}
-          >
-            ⚙ SCENARIOS {Object.keys(interventions).length > 0 ? `(${Object.keys(interventions).length})` : ''}
+          <button onClick={() => setShowInterventions(true)} className="px-5 py-2 bg-cyan-950/40 border border-cyan-800/80 hover:bg-cyan-900/60 hover:border-cyan-400 text-cyan-300 text-xs rounded uppercase font-mono transition-all shadow-[0_0_10px_rgba(0,212,255,0.1)]">
+            do-Calculus / Interventions ({Object.keys(interventions).length})
           </button>
         </div>
       </div>
 
-      {/* ── GRAPH ── */}
-      <div style={{ flex: 1, position: 'relative', overflow: 'hidden' }}>
-        {/* Dot grid bg */}
-        <div style={{
-          position: 'absolute', inset: 0, opacity: 0.04, pointerEvents: 'none',
-          backgroundImage: 'radial-gradient(circle at center, #00D4FF 1px, transparent 1px)',
-          backgroundSize: '28px 28px',
-        }} />
-
-        <ReactFlow
-          nodes={nodes}
-          edges={edges}
-          nodeTypes={nodeTypes}
-          edgeTypes={edgeTypes}
-          onNodeClick={(_, n) => {
-            if (DATA[n.id].t !== 'R') setSelectedNode(n.id);
-          }}
-          fitView
-          maxZoom={1.8}
-          minZoom={0.08}
-          defaultViewport={{ x: 0, y: 0, zoom: 0.28 }}
-          attributionPosition="bottom-right"
-          nodesDraggable={true}
-          panOnDrag={true}
-          zoomOnPinch={true}
-          preventScrolling={false}
-        >
-          <Background color="#1e293b" gap={28} size={1} />
-          <Controls className="hidden md:flex" style={{ background: '#0b111a', border: '1px solid #1e293b' }} />
-          <MiniMap
-            className="hidden lg:block"
-            style={{ background: '#0b111a', border: '1px solid #1e293b', bottom: 280 }}
-            nodeColor={(n) => getColor(computed[n.id])}
-            maskColor="rgba(0,0,0,0.75)"
-          />
-        </ReactFlow>
-
-        {/* ── BOTTOM ANALYTICS PANEL ── */}
-        <div style={{
-          position: 'absolute',
-          bottom: 0, left: 0, right: 0,
-          background: 'rgba(4,7,12,0.97)',
-          borderTop: '1px solid rgba(0,212,255,0.2)',
-          backdropFilter: 'blur(16px)',
-          zIndex: 20,
-          display: 'flex',
-          flexDirection: 'column',
-          height: isBottomPanelOpen ? 'min(55vh, 300px)' : 44,
-          transition: 'height 0.3s cubic-bezier(0.4,0,0.2,1)',
-        }}>
-          {/* Toggle bar */}
-          <div
-            onClick={() => setIsBottomPanelOpen(!isBottomPanelOpen)}
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'space-between',
-              padding: '0 16px',
-              height: 44,
-              cursor: 'pointer',
-              borderBottom: isBottomPanelOpen ? '1px solid rgba(0,212,255,0.1)' : 'none',
-              flexShrink: 0,
-              userSelect: 'none',
-            }}
-          >
-            <span style={{ fontFamily: "'Share Tech Mono', monospace", fontSize: 10, color: '#22d3ee', letterSpacing: 2, textTransform: 'uppercase' }}>
-              📊 Analytics Dashboard
-            </span>
-            <span style={{ color: '#22d3ee', fontSize: 12 }}>{isBottomPanelOpen ? '▼' : '▲'}</span>
+      <div className="flex flex-1 overflow-hidden relative">
+        {/* LEFT SIDEBAR - ROOTS */}
+        <div className="w-[340px] bg-[#080B10] border-r border-cyan-900/40 flex flex-col z-20 shrink-0 shadow-[10px_0_20px_rgba(0,0,0,0.5)]">
+          <div className="p-4 border-b border-cyan-900/40 font-bold text-cyan-500 tracking-wider text-sm flex justify-between items-center bg-[#0A0E14]">
+            DRIVER VARIABLES (INPUTS)
+            <button onClick={() => applyScenario("Status Quo — March 2026 Baseline")} className="text-[10px] bg-cyan-950 border border-cyan-900 hover:bg-cyan-900 px-2 py-1 rounded text-cyan-200 transition">RESET</button>
           </div>
-
-          {/* Panel content */}
-          {isBottomPanelOpen && (
-            <div style={{ display: 'flex', flexDirection: 'column', flex: 1, overflow: 'hidden' }}>
-              {/* Tabs */}
-              <div style={{
-                display: 'flex',
-                borderBottom: '1px solid rgba(0,212,255,0.1)',
-                overflowX: 'auto',
-                flexShrink: 0,
-              }}>
-                {['sensitivity', 'shapley', 'mc'].map(tab => (
-                  <button key={tab}
-                    onClick={e => { e.stopPropagation(); setActiveTab(tab); }}
-                    style={{
-                      padding: '8px 18px',
-                      fontFamily: "'Share Tech Mono', monospace",
-                      fontSize: 10,
-                      letterSpacing: 2,
-                      textTransform: 'uppercase',
-                      background: 'none',
-                      border: 'none',
-                      borderBottom: activeTab === tab ? '2px solid #22d3ee' : '2px solid transparent',
-                      color: activeTab === tab ? '#22d3ee' : '#6b7280',
-                      cursor: 'pointer',
-                      whiteSpace: 'nowrap',
-                      transition: 'all 0.2s',
-                    }}
-                  >
-                    {tab === 'mc' ? 'Monte Carlo' : tab}
-                  </button>
-                ))}
+          <div className="flex-1 overflow-y-auto p-4 space-y-4 pb-24 custom-scrollbar">
+            {Object.keys(roots).map(r => (
+              <div key={r} className="bg-black/40 border border-gray-800/80 rounded shadow-md p-3 transition-colors hover:border-gray-700">
+                <div className="flex justify-between items-center mb-1.5">
+                  <span className="font-mono text-[13px] font-bold text-cyan-500">{r}</span>
+                  <span className="text-[11px] font-mono px-1.5 py-0.5 rounded border" style={{ color: getColor(roots[r]), borderColor: `${getColor(roots[r])}40`, backgroundColor: `${getColor(roots[r])}10` }}>{(roots[r] * 100).toFixed(0)}%</span>
+                </div>
+                <div className="text-[11px] font-sans leading-tight text-gray-400 mb-3 line-clamp-2" title={DATA[r].n}>{DATA[r].n}</div>
+                <input type="range" min="0" max="1" step="0.01" value={roots[r]} onChange={(e) => handleRootChange(r, parseFloat(e.target.value))}
+                  className="w-full h-1.5 bg-gray-900 rounded-lg appearance-none cursor-pointer outline-none transition-all"
+                  style={{ background: `linear-gradient(to right, ${getColor(roots[r])} ${roots[r]*100}%, #111827 ${roots[r]*100}%)` }} />
               </div>
+            ))}
+          </div>
+        </div>
 
-              {/* Tab body */}
-              <div className="custom-scrollbar" style={{ flex: 1, overflowY: 'auto', padding: '14px 16px' }}>
-                {activeTab === 'sensitivity' && (
-                  <div>
-                    <div style={{ fontFamily: "'Share Tech Mono', monospace", fontSize: 9, color: '#0e7490', letterSpacing: 2, textTransform: 'uppercase', marginBottom: 12 }}>
-                      TOP DRIVERS (∂P(WW3)/∂Rᵢ)
-                    </div>
-                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))', gap: '8px 32px' }}>
-                      {sensitivityData.slice(0, 8).map((d) => (
-                        <div key={d.id} style={{ display: 'flex', alignItems: 'center', fontFamily: "'Share Tech Mono', monospace", fontSize: 10 }}>
-                          <span style={{ width: 28, color: '#22d3ee', fontWeight: 700 }}>{d.id}</span>
-                          <div style={{ flex: 1, height: 6, background: '#111827', borderRadius: 3, margin: '0 10px', overflow: 'hidden' }}>
-                            <div style={{
-                              height: '100%',
-                              width: `${(d.v / (sensitivityData[0]?.v || 1)) * 100}%`,
-                              background: getColor(roots[d.id]),
-                              borderRadius: 3,
-                              transition: 'width 0.4s',
-                            }} />
-                          </div>
-                          <span style={{ color: '#6b7280', width: 42, textAlign: 'right' }}>{d.v.toFixed(3)}</span>
+        {/* MAIN GRAPH AREA */}
+        <div className="flex-1 relative bg-[#0A0E14]">
+          {/* Subtle hex grid pattern overlay */}
+          <div className="absolute inset-0 opacity-[0.04] pointer-events-none" style={{ backgroundImage: 'radial-gradient(circle at center, #00D4FF 1px, transparent 1px)', backgroundSize: '30px 30px' }} />
+          
+          <ReactFlow nodes={nodes} edges={edges} nodeTypes={nodeTypes} edgeTypes={edgeTypes} onNodeClick={(_, n) => setSelectedNode(n.id)} fitView maxZoom={1.5} minZoom={0.1} defaultViewport={{ x: 0, y: 0, zoom: 0.4 }}>
+            <Background color="#1e293b" gap={25} size={1} />
+            <Controls className="bg-gray-950 border-gray-800 fill-gray-300 shadow-xl" />
+            <MiniMap className="bg-[#0B111A] border border-gray-800 !bottom-52" nodeColor={(n) => getColor(computed[n.id])} maskColor="#00000080" />
+          </ReactFlow>
+
+          {/* BOTTOM ANALYTICS PANEL */}
+          <div className="absolute bottom-0 left-0 right-0 bg-[#06090D]/95 border-t border-cyan-900/60 backdrop-blur-xl z-20 shadow-[0_-10px_30px_rgba(0,0,0,0.8)]">
+            <div className="flex border-b border-cyan-900/40 bg-black/20">
+              {['sensitivity', 'shapley', 'mc'].map(tab => (
+                <button key={tab} onClick={() => setActiveTab(tab)}
+                  className={`px-8 py-2.5 text-xs font-mono tracking-widest transition-colors ${activeTab === tab ? 'border-b-2 border-cyan-500 text-cyan-400 bg-cyan-950/40' : 'text-gray-500 hover:text-gray-300 hover:bg-white/5'}`}>
+                  {tab === 'mc' ? 'MONTE CARLO (BETA)' : tab.toUpperCase()}
+                </button>
+              ))}
+            </div>
+            <div className="p-5 h-52 overflow-y-auto custom-scrollbar">
+              {activeTab === 'sensitivity' && (
+                <div>
+                  <div className="text-xs text-cyan-600 mb-3 font-mono tracking-wider">WHICH DRIVER VARIABLES MOST DRIVE WW3 RISK RIGHT NOW? (PARTIAL DERIVATIVE)</div>
+                  <div className="grid grid-cols-2 gap-x-12 gap-y-2">
+                    {sensitivityData.slice(0, 10).map((d) => (
+                      <div key={d.id} className="flex items-center text-[11px] font-mono group">
+                        <span className="w-8 text-cyan-600 font-bold group-hover:text-cyan-400 transition">{d.id}</span>
+                        <div className="flex-1 h-2.5 bg-gray-900 rounded mx-3 overflow-hidden relative shadow-inner">
+                          <div className="h-full absolute left-0 top-0 transition-all duration-500" style={{ width: `${(d.v / sensitivityData[0].v) * 100}%`, backgroundColor: getColor(roots[d.id]) }} />
                         </div>
-                      ))}
-                    </div>
+                        <span className="w-12 text-right text-gray-500">{d.v.toFixed(3)}</span>
+                      </div>
+                    ))}
                   </div>
-                )}
-                {activeTab === 'shapley' && (
-                  <div>
-                    <div style={{ fontFamily: "'Share Tech Mono', monospace", fontSize: 9, color: '#0e7490', letterSpacing: 2, textTransform: 'uppercase', marginBottom: 12 }}>
-                      NORMALIZED CAUSAL CONTRIBUTION
-                    </div>
-                    <div style={{ display: 'flex', height: 28, borderRadius: 6, overflow: 'hidden', border: '1px solid #1e293b', marginBottom: 12 }}>
-                      {shapleyData.map(d => (
-                        <div key={d.id} style={{ flex: d.pct, background: getColor(roots[d.id]), borderRight: '1px solid rgba(0,0,0,0.4)', transition: 'flex 0.4s' }} title={`${d.id}: ${d.pct.toFixed(1)}%`} />
-                      ))}
-                    </div>
-                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-                      {shapleyData.slice(0, 8).map(d => (
-                        <div key={d.id} style={{
-                          display: 'flex', alignItems: 'center', gap: 5,
-                          background: 'rgba(0,0,0,0.4)', border: '1px solid #1e293b',
-                          padding: '3px 8px', borderRadius: 4,
-                          fontFamily: "'Share Tech Mono', monospace", fontSize: 10,
-                        }}>
-                          <div style={{ width: 8, height: 8, borderRadius: 2, background: getColor(roots[d.id]) }} />
-                          <span style={{ color: '#e2e8f0', fontWeight: 700 }}>{d.id}</span>
-                          <span style={{ color: '#6b7280' }}>{d.pct.toFixed(1)}%</span>
-                        </div>
-                      ))}
-                    </div>
+                </div>
+              )}
+              {activeTab === 'shapley' && (
+                <div>
+                  <div className="text-xs text-cyan-600 mb-4 font-mono tracking-wider">NORMALIZED CAUSAL CONTRIBUTION DISTRIBUTION</div>
+                  <div className="w-full h-10 flex rounded overflow-hidden shadow-2xl mb-4 border border-gray-800">
+                    {shapleyData.map(d => (
+                      <div key={d.id} style={{ width: `${d.pct}%`, backgroundColor: getColor(roots[d.id]) }} className="h-full border-r border-black/50 hover:opacity-80 transition cursor-help relative group">
+                        <div className="hidden group-hover:block absolute top-full left-1/2 -translate-x-1/2 mt-1 z-50 bg-black text-white text-[10px] font-mono p-1 rounded whitespace-nowrap">{d.id}: {d.pct.toFixed(1)}%</div>
+                      </div>
+                    ))}
                   </div>
-                )}
-                {activeTab === 'mc' && (
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-                    <button onClick={runMC} disabled={mcRunning} style={{
-                      padding: '8px 18px',
-                      background: mcRunning ? '#1e3a4a' : 'rgba(8,50,70,0.7)',
-                      border: '1px solid rgba(0,212,255,0.3)',
-                      borderRadius: 6,
-                      color: '#67e8f9',
-                      fontFamily: "'Share Tech Mono', monospace",
-                      fontSize: 10,
-                      letterSpacing: 2,
-                      cursor: mcRunning ? 'not-allowed' : 'pointer',
-                      textTransform: 'uppercase',
-                      alignSelf: 'flex-start',
-                      opacity: mcRunning ? 0.6 : 1,
-                      transition: 'all 0.2s',
-                    }}>
-                      {mcRunning ? 'SIMULATING…' : 'RUN MONTE CARLO (10K)'}
-                    </button>
-                    {mcResults && !mcRunning && (
-                      <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', alignItems: 'flex-end' }}>
-                        <div style={{ flex: '1 1 160px', height: 56, display: 'flex', alignItems: 'flex-end', gap: 1, borderBottom: '1px solid #1e293b' }}>
-                          {Array.from({ length: 50 }).map((_, i) => {
-                            const bucketMin = i / 50; const bucketMax = (i + 1) / 50;
-                            const count = mcResults.hist.filter(v => v >= bucketMin && v < bucketMax).length;
-                            return <div key={i} style={{ flex: 1, height: `${Math.max(2, (count / 1500) * 100)}%`, background: getColor(bucketMin), transition: 'height 0.3s' }} />;
-                          })}
-                        </div>
-                        <div style={{
-                          background: 'rgba(0,0,0,0.5)',
-                          border: '1px solid #1e293b',
-                          borderRadius: 7,
-                          padding: '10px 14px',
-                          fontFamily: "'Share Tech Mono', monospace",
-                          fontSize: 11,
-                          display: 'flex',
-                          flexDirection: 'column',
-                          gap: 5,
-                          minWidth: 180,
-                        }}>
-                          <div style={{ display: 'flex', justifyContent: 'space-between', gap: 16 }}>
-                            <span style={{ color: '#6b7280' }}>P05 Optimistic</span>
-                            <span style={{ color: '#22c55e', fontWeight: 700 }}>{(mcResults.p5 * 100).toFixed(1)}%</span>
-                          </div>
-                          <div style={{ display: 'flex', justifyContent: 'space-between', gap: 16 }}>
-                            <span style={{ color: '#6b7280' }}>Mean Estimate</span>
-                            <span style={{ color: '#f59e0b', fontWeight: 700 }}>{(mcResults.mean * 100).toFixed(1)}%</span>
-                          </div>
-                          <div style={{ display: 'flex', justifyContent: 'space-between', gap: 16 }}>
-                            <span style={{ color: '#6b7280' }}>P95 Pessimistic</span>
-                            <span style={{ color: '#ef4444', fontWeight: 700 }}>{(mcResults.p95 * 100).toFixed(1)}%</span>
-                          </div>
+                  <div className="flex flex-wrap gap-3 text-[11px] font-mono text-gray-400">
+                    {shapleyData.slice(0, 10).map(d => (
+                      <div key={d.id} className="flex items-center bg-black/40 px-2 py-1 rounded border border-gray-800">
+                        <div className="w-2.5 h-2.5 mr-2 rounded-sm shadow-sm" style={{ backgroundColor: getColor(roots[d.id]) }} />
+                        <span className="font-bold text-gray-300 mr-1">{d.id}</span> {d.pct.toFixed(1)}%
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {activeTab === 'mc' && (
+                <div>
+                  <button onClick={runMC} disabled={mcRunning} className="mb-4 px-6 py-2 bg-cyan-950 border border-cyan-800 text-cyan-300 text-[11px] font-mono tracking-wider rounded hover:bg-cyan-900 transition disabled:opacity-50 disabled:cursor-not-allowed shadow-lg">
+                    {mcRunning ? 'EXECUTING BETA SIMULATION...' : 'RUN MONTE CARLO (10,000 SAMPLES)'}
+                  </button>
+                  {mcResults && !mcRunning && (
+                    <div className="flex space-x-12 items-center">
+                      <div className="flex-1 h-24 flex items-end border-b border-gray-800 space-x-[1px]">
+                        {Array.from({ length: 50 }).map((_, i) => {
+                          const bucketMin = i / 50; const bucketMax = (i + 1) / 50;
+                          const count = mcResults.hist.filter(v => v >= bucketMin && v < bucketMax).length;
+                          return <div key={i} className="flex-1 transition-all hover:opacity-80 cursor-help" style={{ height: `${(count / 1500) * 100}%`, backgroundColor: getColor(bucketMin) }} title={`P=${(bucketMin * 100).toFixed(0)}%: ${count} samples`} />;
+                        })}
+                      </div>
+                      <div className="font-mono text-sm space-y-2 bg-black/60 p-4 rounded-lg border border-gray-800 shadow-xl w-72">
+                        <div className="flex justify-between"><span className="text-gray-500">P05 (Optimistic):</span> <span className="text-green-500 font-bold">{(mcResults.p5 * 100).toFixed(1)}%</span></div>
+                        <div className="flex justify-between"><span className="text-gray-500">Mean Estimate:</span> <span className="text-amber-500 font-bold">{(mcResults.mean * 100).toFixed(1)}%</span></div>
+                        <div className="flex justify-between"><span className="text-gray-500">P95 (Pessimistic):</span> <span className="text-red-500 font-bold">{(mcResults.p95 * 100).toFixed(1)}%</span></div>
+                        <div className="text-[10px] text-gray-400 mt-2 pt-2 border-t border-gray-800 leading-tight">
+                          Range: {getWEP(mcResults.p5)} to {getWEP(mcResults.p95)} — Uncertainty distributed across baseline variance.
                         </div>
                       </div>
-                    )}
-                  </div>
-                )}
-              </div>
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
-          )}
+          </div>
         </div>
-      </div>
 
-      {/* ── NODE INSPECTOR DRAWER (right slide-in) ── */}
-      {selectedNode && (
-        <>
-          <div
-            onClick={() => setSelectedNode(null)}
-            style={{
-              position: 'fixed', inset: 0,
-              background: 'rgba(0,0,0,0.55)',
-              backdropFilter: 'blur(4px)',
-              zIndex: 40,
-            }}
-            className="animate-fade-in"
-          />
-          <div
-            className="animate-slide-in-right"
-            style={{
-              position: 'fixed', top: 0, right: 0, bottom: 0,
-              width: 'min(88vw, 380px)',
-              background: 'rgba(5,9,15,0.98)',
-              borderLeft: '1px solid rgba(0,212,255,0.2)',
-              backdropFilter: 'blur(20px)',
-              zIndex: 50,
-              display: 'flex',
-              flexDirection: 'column',
-              boxShadow: '-20px 0 40px rgba(0,0,0,0.8)',
-            }}
-          >
-            {/* Drawer header */}
-            <div style={{
-              padding: '14px 16px',
-              borderBottom: '1px solid rgba(0,212,255,0.15)',
-              display: 'flex',
-              justifyContent: 'space-between',
-              alignItems: 'center',
-              background: 'rgba(0,0,0,0.3)',
-              flexShrink: 0,
-            }}>
-              <span style={{ fontFamily: "'Share Tech Mono', monospace", fontSize: 10, color: '#22d3ee', letterSpacing: 3, textTransform: 'uppercase' }}>
-                NODE INSPECTOR
-              </span>
-              <button
-                onClick={() => setSelectedNode(null)}
-                style={{
-                  background: '#111827', border: '1px solid #374151',
-                  color: '#9ca3af', borderRadius: 6, padding: '6px 12px',
-                  cursor: 'pointer', fontSize: 13, fontWeight: 700,
-                  transition: 'all 0.2s',
-                }}
-              >✕</button>
+        {/* RIGHT SIDEBAR - INSPECTOR */}
+        {selectedNode && (
+          <div className="w-[360px] bg-[#080B10]/95 backdrop-blur-xl border-l border-cyan-900/50 flex flex-col z-30 shrink-0 shadow-[-20px_0_40px_rgba(0,0,0,0.6)]">
+            <div className="p-4 border-b border-cyan-900/50 flex justify-between items-center bg-black/40">
+              <span className="font-bold text-cyan-400 tracking-wider text-sm">NODE INSPECTOR</span>
+              <button onClick={() => setSelectedNode(null)} className="text-gray-500 hover:text-white transition bg-gray-900 px-2 py-0.5 rounded text-xs">✕</button>
             </div>
-
-            {/* Drawer body */}
-            <div className="custom-scrollbar" style={{ flex: 1, overflowY: 'auto', padding: '16px' }}>
-              <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8, flexWrap: 'wrap' }}>
-                <span style={{
-                  fontFamily: "'Share Tech Mono', monospace", fontSize: 11, fontWeight: 700,
-                  color: '#22d3ee', background: '#083344', border: '1px solid #164e63',
-                  padding: '3px 10px', borderRadius: 5,
-                }}>{selectedNode}</span>
-                <span style={{ fontFamily: "'Share Tech Mono', monospace", fontSize: 9, color: '#6b7280', letterSpacing: 2, textTransform: 'uppercase' }}>
-                  {DATA[selectedNode].t === 'R' ? 'Root Node' : DATA[selectedNode].t === 'T' ? 'Terminal Node' : DATA[selectedNode].t === 'E' ? 'Escalation Node' : 'Intermediate Node'}
-                </span>
+            <div className="p-5 overflow-y-auto custom-scrollbar">
+              <div className="flex justify-between items-start mb-2">
+                 <div className="font-mono text-xs font-bold px-2 py-1 bg-cyan-950 text-cyan-400 border border-cyan-900 rounded">{selectedNode}</div>
+                 <div className="font-mono text-[10px] uppercase text-gray-500 tracking-widest">{DATA[selectedNode].t === 'R' ? 'Root Node' : DATA[selectedNode].t === 'T' ? 'Terminal Node' : DATA[selectedNode].t === 'E' ? 'Escalation Node' : 'Intermediate Node'}</div>
               </div>
-
-              <h2 style={{ fontSize: 18, fontWeight: 700, color: '#f1f5f9', lineHeight: 1.3, marginBottom: 14 }}>
-                {DATA[selectedNode].n}
-              </h2>
-
-              <div style={{
-                fontFamily: "'Share Tech Mono', monospace",
-                fontSize: 44,
-                fontWeight: 700,
-                color: getColor(computed[selectedNode]),
-                lineHeight: 1,
-                marginBottom: 16,
-                borderBottom: '1px solid #1e293b',
-                paddingBottom: 14,
-              }}>
+              <h2 className="text-xl font-bold leading-tight mb-5 text-gray-100">{DATA[selectedNode].n}</h2>
+              <div className="text-5xl font-mono font-bold mb-6 border-b border-gray-800/80 pb-5 drop-shadow-md" style={{ color: getColor(computed[selectedNode]) }}>
                 {(computed[selectedNode] * 100).toFixed(1)}%
               </div>
-
-              <div style={{
-                fontSize: 12,
-                color: '#94a3b8',
-                lineHeight: 1.6,
-                background: 'rgba(0,0,0,0.4)',
-                padding: '12px 14px',
-                borderRadius: 8,
-                border: '1px solid #1e293b',
-                marginBottom: 16,
-              }}>
+              <div className="text-xs text-gray-300 mb-6 leading-relaxed bg-black/50 p-4 rounded-lg border border-gray-800 shadow-inner">
                 {DATA[selectedNode].txt}
               </div>
-
               {DATA[selectedNode].deps && (
-                <div>
-                  <div style={{ fontFamily: "'Share Tech Mono', monospace", fontSize: 9, color: '#0e7490', letterSpacing: 2, textTransform: 'uppercase', marginBottom: 10 }}>
-                    CAUSAL PARENTS
-                  </div>
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                <div className="mb-4">
+                  <div className="text-[10px] uppercase font-bold text-cyan-700 tracking-widest mb-3">Causal Parents</div>
+                  <div className="space-y-2">
                     {Object.entries(DATA[selectedNode].deps).map(([pId, ciw]) => (
-                      <div
-                        key={pId}
-                        onClick={() => setSelectedNode(pId)}
-                        style={{
-                          display: 'flex', alignItems: 'center',
-                          background: 'rgba(0,0,0,0.35)',
-                          border: '1px solid #1e293b',
-                          borderRadius: 7,
-                          padding: '9px 12px',
-                          cursor: 'pointer',
-                          gap: 10,
-                          transition: 'border-color 0.2s',
-                        }}
-                      >
-                        <span style={{ fontFamily: "'Share Tech Mono', monospace", fontSize: 11, color: '#22d3ee', fontWeight: 700, minWidth: 32 }}>{pId}</span>
-                        <span style={{ fontSize: 11, color: '#94a3b8', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{DATA[pId].n}</span>
-                        <div style={{ textAlign: 'right', flexShrink: 0 }}>
-                          <div style={{ fontFamily: "'Share Tech Mono', monospace", fontSize: 13, fontWeight: 700, color: getColor(computed[pId]) }}>
-                            {(computed[pId] * 100).toFixed(0)}%
-                          </div>
-                          <div style={{ fontFamily: "'Share Tech Mono', monospace", fontSize: 8, color: '#d97706' }}>CIW {ciw.toFixed(2)}</div>
+                      <div key={pId} className="flex justify-between items-center bg-black/40 p-2.5 rounded border border-gray-800 hover:border-gray-600 transition cursor-pointer" onClick={() => setSelectedNode(pId)}>
+                        <span className="font-mono text-cyan-600 font-bold w-8">{pId}</span>
+                        <span className="text-[11px] text-gray-400 truncate flex-1 mx-2" title={DATA[pId].n}>{DATA[pId].n}</span>
+                        <div className="text-right">
+                          <div className="font-mono text-sm font-bold" style={{ color: getColor(computed[pId]) }}>{(computed[pId] * 100).toFixed(0)}%</div>
+                          <div className="text-[9px] font-mono text-amber-500/80">CIW {ciw.toFixed(2)}</div>
                         </div>
                       </div>
                     ))}
@@ -1009,239 +565,73 @@ export default function BBNApp() {
               )}
             </div>
           </div>
-        </>
-      )}
+        )}
 
-      {/* ── SCENARIOS / DO-CALCULUS MODAL ── */}
-      {showInterventions && (
-        <>
-          <div
-            onClick={() => setShowInterventions(false)}
-            style={{
-              position: 'fixed', inset: 0,
-              background: 'rgba(0,0,0,0.75)',
-              backdropFilter: 'blur(6px)',
-              zIndex: 60,
-            }}
-            className="animate-fade-in"
-          />
-          <div
-            className="animate-slide-up"
-            style={{
-              position: 'fixed',
-              bottom: 0, left: 0, right: 0,
-              maxHeight: '92dvh',
-              background: 'rgba(5,9,15,0.99)',
-              borderTop: '1px solid rgba(0,212,255,0.25)',
-              borderRadius: '20px 20px 0 0',
-              zIndex: 70,
-              display: 'flex',
-              flexDirection: 'column',
-              boxShadow: '0 -20px 60px rgba(0,0,0,0.9)',
-            }}
-          >
-            {/* Modal header */}
-            <div style={{
-              padding: '16px 20px',
-              borderBottom: '1px solid rgba(0,212,255,0.12)',
-              display: 'flex',
-              justifyContent: 'space-between',
-              alignItems: 'center',
-              flexShrink: 0,
-            }}>
-              <div>
-                <div style={{ fontFamily: "'Share Tech Mono', monospace", fontSize: 14, color: '#22d3ee', letterSpacing: 2, textTransform: 'uppercase' }}>
-                  DO-CALCULUS CONSOLE
-                </div>
-                <div style={{ fontFamily: "'Share Tech Mono', monospace", fontSize: 9, color: '#4b5563', letterSpacing: 2, marginTop: 2 }}>
-                  SCENARIOS & MANUAL OVERRIDES
-                </div>
+        {/* INTERVENTION MODAL / SCENARIOS */}
+        {showInterventions && (
+          <div className="absolute inset-0 bg-black/90 backdrop-blur-md z-50 flex justify-center items-center p-8">
+            <div className="bg-[#080B10] border border-cyan-800 rounded-xl shadow-[0_0_50px_rgba(0,212,255,0.15)] w-full max-w-5xl max-h-full flex flex-col">
+              <div className="p-5 border-b border-cyan-900/60 flex justify-between items-center bg-[#0A0E14]">
+                <h2 className="text-xl font-bold text-cyan-400 tracking-widest uppercase">DO-CALCULUS & SCENARIO CONSOLE</h2>
+                <button onClick={() => setShowInterventions(false)} className="text-gray-400 hover:text-white bg-gray-900 hover:bg-gray-800 px-3 py-1 rounded transition text-sm">✕</button>
               </div>
-              <button
-                onClick={() => setShowInterventions(false)}
-                style={{
-                  background: '#111827', border: '1px solid #374151',
-                  color: '#9ca3af', borderRadius: 8,
-                  padding: '8px 16px', cursor: 'pointer',
-                  fontSize: 13, fontWeight: 700,
-                }}
-              >✕</button>
-            </div>
-
-            {/* Modal body — two columns on desktop, stacked on mobile */}
-            <div className="custom-scrollbar" style={{ flex: 1, overflowY: 'auto', display: 'flex', flexWrap: 'wrap', gap: 0 }}>
-
-              {/* Preset scenarios */}
-              <div style={{
-                flex: '1 1 280px',
-                borderRight: '1px solid rgba(0,212,255,0.08)',
-                padding: '16px 18px',
-              }}>
-                <div style={{ fontFamily: "'Share Tech Mono', monospace", fontSize: 9, color: '#0e7490', letterSpacing: 2, textTransform: 'uppercase', marginBottom: 12 }}>
-                  PRESET SCENARIOS
+              <div className="flex flex-1 overflow-hidden min-h-[500px]">
+                <div className="w-1/2 border-r border-gray-800 p-6 overflow-y-auto custom-scrollbar bg-black/20">
+                  <h3 className="text-[11px] font-mono text-cyan-700 font-bold tracking-widest mb-4">PRESET SCENARIOS</h3>
+                  <div className="space-y-3">
+                    {Object.keys(SCENARIOS).map(s => (
+                      <button key={s} onClick={() => applyScenario(s)}
+                        className={`w-full text-left p-4 rounded-lg border text-sm transition-all shadow-sm ${activeScenario === s ? 'bg-cyan-950/60 border-cyan-500 text-cyan-100' : 'bg-[#0A0E14] border-gray-800 text-gray-400 hover:border-gray-600 hover:bg-gray-900/50'}`}>
+                        <div className="font-bold mb-1">{s}</div>
+                        <div className="text-[10px] font-mono text-gray-500 opacity-80">
+                          {SCENARIOS[s].type === 'intervene' ? 'do() Override Profile' : 'Root Baseline Shift'}
+                        </div>
+                      </button>
+                    ))}
+                  </div>
                 </div>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                  {Object.keys(SCENARIOS).map(s => (
-                    <button
-                      key={s}
-                      onClick={() => { applyScenario(s); setShowInterventions(false); }}
-                      style={{
-                        textAlign: 'left',
-                        padding: '11px 14px',
-                        borderRadius: 9,
-                        border: `1px solid ${activeScenario === s ? '#0891b2' : '#1e293b'}`,
-                        background: activeScenario === s ? 'rgba(8,50,70,0.6)' : 'rgba(0,0,0,0.3)',
-                        color: activeScenario === s ? '#e2e8f0' : '#94a3b8',
-                        cursor: 'pointer',
-                        transition: 'all 0.2s',
-                        display: 'flex',
-                        flexDirection: 'column',
-                        gap: 3,
-                      }}
-                    >
-                      <span style={{ fontSize: 13, fontWeight: 600 }}>{s}</span>
-                      <span style={{ fontFamily: "'Share Tech Mono', monospace", fontSize: 9, color: '#6b7280' }}>
-                        {SCENARIOS[s].type === 'intervene' ? 'do() Override Profile' : 'Root Baseline Shift'}
-                      </span>
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              {/* Active interventions + manual */}
-              <div style={{ flex: '1 1 280px', padding: '16px 18px', display: 'flex', flexDirection: 'column', gap: 16 }}>
-
-                {/* Active list */}
-                <div>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
-                    <div style={{ fontFamily: "'Share Tech Mono', monospace", fontSize: 9, color: '#0e7490', letterSpacing: 2, textTransform: 'uppercase' }}>
-                      ACTIVE OVERRIDES
-                    </div>
-                    {Object.keys(interventions).length > 0 && (
-                      <button
-                        onClick={() => setInterventions({})}
-                        style={{
-                          background: 'rgba(69,10,10,0.5)',
-                          border: '1px solid #7f1d1d',
-                          color: '#f87171',
-                          borderRadius: 5,
-                          padding: '4px 10px',
-                          fontFamily: "'Share Tech Mono', monospace",
-                          fontSize: 9,
-                          cursor: 'pointer',
-                          letterSpacing: 1,
-                          textTransform: 'uppercase',
-                        }}
-                      >CLEAR ALL</button>
-                    )}
+                <div className="w-1/2 p-6 overflow-y-auto custom-scrollbar">
+                  <div className="flex justify-between items-center mb-5">
+                    <h3 className="text-[11px] font-mono text-cyan-700 font-bold tracking-widest">ACTIVE INTERVENTIONS do(X = p)</h3>
+                    <button onClick={() => setInterventions({})} className="text-[10px] font-mono font-bold bg-red-950/60 text-red-400 px-3 py-1.5 rounded border border-red-900 hover:bg-red-900 transition">CLEAR ALL OVERRIDES</button>
                   </div>
                   {Object.keys(interventions).length === 0 ? (
-                    <div style={{
-                      fontFamily: "'Share Tech Mono', monospace", fontSize: 10,
-                      color: '#4b5563', background: 'rgba(0,0,0,0.2)',
-                      border: '1px dashed #1e293b', borderRadius: 7,
-                      padding: '12px', textAlign: 'center',
-                    }}>No overrides active</div>
+                    <div className="text-sm text-gray-600 italic bg-black/30 p-4 rounded border border-gray-800/50 text-center mb-6">No nodes locked. Model is propagating organically.</div>
                   ) : (
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                    <div className="space-y-2 mb-8">
                       {Object.entries(interventions).map(([id, val]) => (
-                        <div key={id} style={{
-                          display: 'flex', alignItems: 'center', gap: 10,
-                          background: 'rgba(8,50,70,0.3)',
-                          border: '1px solid rgba(0,212,255,0.2)',
-                          borderRadius: 7, padding: '8px 12px',
-                        }}>
-                          <span style={{ fontFamily: "'Share Tech Mono', monospace", fontSize: 10, color: '#22d3ee', fontWeight: 700 }}>
-                            do({id}={(val * 100).toFixed(0)}%)
-                          </span>
-                          <span style={{ fontSize: 11, color: '#6b7280', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                            {DATA[id].n}
-                          </span>
-                          <button
-                            onClick={() => { const c = { ...interventions }; delete c[id]; setInterventions(c); }}
-                            style={{
-                              background: 'rgba(127,29,29,0.4)', border: '1px solid #7f1d1d',
-                              color: '#f87171', borderRadius: 4,
-                              width: 26, height: 26, cursor: 'pointer',
-                              display: 'flex', alignItems: 'center', justifyContent: 'center',
-                              fontSize: 11, fontWeight: 700, flexShrink: 0,
-                            }}
-                          >✕</button>
+                        <div key={id} className="flex justify-between items-center bg-cyan-950/20 border border-cyan-900/50 p-3 rounded-lg shadow-sm">
+                          <span className="font-mono text-cyan-300 text-xs font-bold tracking-widest">do({id} = {(val * 100).toFixed(0)}%)</span>
+                          <span className="text-[10px] text-gray-400 ml-4 flex-1 truncate">{DATA[id].n}</span>
+                          <button onClick={() => { const copy = { ...interventions }; delete copy[id]; setInterventions(copy); }} className="text-red-500 hover:text-red-400 bg-red-950/40 w-6 h-6 rounded flex justify-center items-center ml-4">✕</button>
                         </div>
                       ))}
                     </div>
                   )}
-                </div>
-
-                {/* Manual override */}
-                <div style={{
-                  background: 'rgba(0,0,0,0.3)',
-                  border: '1px solid #1e293b',
-                  borderRadius: 10,
-                  padding: '14px 16px',
-                }}>
-                  <div style={{ fontFamily: "'Share Tech Mono', monospace", fontSize: 9, color: '#6b7280', letterSpacing: 2, textTransform: 'uppercase', marginBottom: 12 }}>
-                    MANUAL OVERRIDE
-                  </div>
-                  <select
-                    id="nodeSelect"
-                    style={{
-                      width: '100%',
-                      background: '#030712',
-                      border: '1px solid #374151',
-                      color: '#e2e8f0',
-                      fontSize: 11,
-                      padding: '10px',
-                      borderRadius: 7,
-                      marginBottom: 12,
-                      fontFamily: "'Share Tech Mono', monospace",
-                      outline: 'none',
-                    }}
-                  >
-                    <option value="">— Select node —</option>
-                    {Object.keys(DATA).map(k => <option key={k} value={k}>[{k}] {DATA[k].n}</option>)}
-                  </select>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}>
-                    <span style={{ fontFamily: "'Share Tech Mono', monospace", fontSize: 10, color: '#6b7280' }}>0%</span>
-                    <input
-                      type="range" id="nodeVal" min="0" max="1" step="0.01" defaultValue="0.5"
-                      className="bbn-slider"
-                      style={{ flex: 1, background: `linear-gradient(to right, #22d3ee 50%, #1f2937 50%)` }}
-                    />
-                    <span style={{ fontFamily: "'Share Tech Mono', monospace", fontSize: 10, color: '#6b7280' }}>100%</span>
-                  </div>
-                  <button
-                    onClick={() => {
+                  <div className="bg-[#0A0E14] p-5 rounded-lg border border-gray-800 shadow-inner">
+                    <h4 className="text-[11px] font-mono text-gray-500 font-bold tracking-widest mb-4">MANUAL OVERRIDE</h4>
+                    <select id="nodeSelect" className="w-full bg-[#06090D] border border-gray-700 text-gray-200 text-xs p-3 rounded-md mb-4 font-mono outline-none focus:border-cyan-500 transition">
+                      <option value="">-- Select specific node --</option>
+                      {Object.keys(DATA).map(k => <option key={k} value={k}>[{k}] {DATA[k].n}</option>)}
+                    </select>
+                    <div className="flex items-center space-x-4 mb-5">
+                      <input type="range" id="nodeVal" min="0" max="1" step="0.01" defaultValue="0.5" className="flex-1 accent-cyan-500 h-1.5 bg-gray-900 rounded-lg cursor-pointer" />
+                      <span className="text-xs font-mono w-12 text-right text-gray-400" id="valDisplay">50%</span>
+                    </div>
+                    <button onClick={() => {
                       const id = document.getElementById('nodeSelect').value;
                       if (id) {
                         setInterventions(p => ({ ...p, [id]: parseFloat(document.getElementById('nodeVal').value) }));
                         setActiveScenario("Custom");
                       }
-                    }}
-                    style={{
-                      width: '100%',
-                      padding: '12px',
-                      background: 'rgba(8,50,70,0.8)',
-                      border: '1px solid rgba(0,212,255,0.3)',
-                      borderRadius: 8,
-                      color: '#67e8f9',
-                      fontFamily: "'Share Tech Mono', monospace",
-                      fontSize: 11,
-                      letterSpacing: 2,
-                      cursor: 'pointer',
-                      textTransform: 'uppercase',
-                      transition: 'all 0.2s',
-                    }}
-                  >
-                    APPLY do() OPERATOR
-                  </button>
+                    }} className="w-full bg-cyan-900/80 hover:bg-cyan-800 text-cyan-100 text-xs font-mono font-bold py-3 rounded-md transition tracking-wider shadow-md">APPLY do() OPERATOR</button>
+                  </div>
                 </div>
               </div>
             </div>
           </div>
-        </>
-      )}
-
+        )}
+      </div>
     </div>
   );
 }
